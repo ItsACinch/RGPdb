@@ -1,0 +1,45 @@
+# Rust
+/target/
+**/*.rs.bk
+*.pdb
+Cargo.lock
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Build artifacts
+*.o
+*.so
+*.dylib
+*.dll
+*.exe
+
+# Debug files
+*.dSYM/
+
+# Test artifacts
+*.test
+*.profraw
+
+# CUDA
+*.ptx
+*.cubin
+*.fatbin
+
+# Project specific
+*.rgdb
+test_level.rgdb
+database.rgdb
+database_updated.rgdb
+
+# Environment
+.env
+.env.local
+
+# Documentation
+target/doc/
