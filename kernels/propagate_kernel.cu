@@ -104,12 +104,8 @@ extern "C" __global__ void propagate_iteration_kernel(
             int neighbor_intensity_idx = neighbor * num_angle_bins + edge_angle_bin;
             
             // Use atomic max to handle concurrent updates
-            float old_val = atomicExch(&next_intensities[neighbor_intensity_idx], transmitted);
-            if (transmitted > old_val) {
-                atomicExch(&next_intensities[neighbor_intensity_idx], transmitted);
-            } else {
-                atomicExch(&next_intensities[neighbor_intensity_idx], old_val);
-            }
+            // atomicMax is the correct operation for finding maximum value atomically
+            atomicMax(&next_intensities[neighbor_intensity_idx], transmitted);
             
             // Accumulate total intensity
             atomicAdd(&total_intensity[neighbor], transmitted);

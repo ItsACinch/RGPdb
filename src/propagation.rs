@@ -1,8 +1,12 @@
 use crate::graph::{Graph, NodeId, AngleBin};
 use crate::pvs::PVS;
+use crate::property_map::{RelationshipProperty, DEFAULT_PROPERTY_MAP};
 
 /// Default minimum luminance value
 const DEFAULT_MIN_LUMINANCE: f32 = 1.0;
+
+/// Minimum property similarity to allow propagation (early termination threshold)
+const MIN_PROPERTY_SIMILARITY: f32 = 0.2;
 
 /// Parameters for the light propagation.
 #[derive(Debug, Clone, Copy)]
@@ -117,28 +121,59 @@ pub fn propagate_light_with_pvs(
     }
     
     let src_props = graph.node_props()[src_idx];
-    let src_room = graph.get_room(source).unwrap_or(0);
 
-    // Seed: starting node gets its luminance in the initial direction.
-    let initial_bin_idx = initial_bin as usize;
-    if initial_bin_idx < b {
-        let src_intensity_idx = src_idx
-            .checked_mul(b)
-            .and_then(|x| x.checked_add(initial_bin_idx));
-        
-        if let Some(idx) = src_intensity_idx {
-            if idx < intensities.len() {
-                let initial_intensity = src_props.luminance.max(DEFAULT_MIN_LUMINANCE);
-                intensities[idx] = initial_intensity;
-                total_intensity[src_idx] += initial_intensity;
+    // Initialize frontier with directional or uniform luminance
+    let mut frontier = Vec::new();
+    
+    // NEW: Directional luminance initialization
+    if let Some(_property) = src_props.relationship_property {
+        // Emit in each direction based on directional_luminance
+        for angle_bin in 0..b {
+            let luminance = src_props.directional_luminance[angle_bin];
+            if luminance > params.min_intensity {
+                let angle_bin_u8 = angle_bin as AngleBin;
+                let src_intensity_idx = src_idx
+                    .checked_mul(b)
+                    .and_then(|x| x.checked_add(angle_bin));
                 
-                // Initialize frontier with this state.
-                let mut frontier = Vec::new();
-                frontier.push(FrontierState {
-                    node: source,
-                    angle_bin: initial_bin,
-                    intensity: initial_intensity,
-                });
+                if let Some(idx) = src_intensity_idx {
+                    if idx < intensities.len() {
+                        intensities[idx] = luminance;
+                        total_intensity[src_idx] += luminance;
+                        frontier.push(FrontierState {
+                            node: source,
+                            angle_bin: angle_bin_u8,
+                            intensity: luminance,
+                        });
+                    }
+                }
+            }
+        }
+    } else {
+        // Fallback: Uniform emission (backward compatibility)
+        let initial_bin_idx = initial_bin as usize;
+        if initial_bin_idx < b {
+            let src_intensity_idx = src_idx
+                .checked_mul(b)
+                .and_then(|x| x.checked_add(initial_bin_idx));
+            
+            if let Some(idx) = src_intensity_idx {
+                if idx < intensities.len() {
+                    let initial_intensity = src_props.luminance.max(DEFAULT_MIN_LUMINANCE);
+                    intensities[idx] = initial_intensity;
+                    total_intensity[src_idx] += initial_intensity;
+                    frontier.push(FrontierState {
+                        node: source,
+                        angle_bin: initial_bin,
+                        intensity: initial_intensity,
+                    });
+                }
+            }
+        }
+    }
+    
+    // Continue with propagation if frontier is not empty
+    if !frontier.is_empty() {
 
                 for _depth in 0..params.max_depth {
                     if frontier.is_empty() {
@@ -173,6 +208,21 @@ pub fn propagate_light_with_pvs(
                                     continue;
                                 }
                             }
+                            
+                            // NEW: Early termination - check property compatibility
+                            let v_idx = v as usize;
+                            if v_idx < n {
+                                let v_props = graph.node_props()[v_idx];
+                                if let Some(u_property) = u_props.relationship_property {
+                                    if let Some(v_property) = v_props.relationship_property {
+                                        // Check semantic compatibility
+                                        let similarity = DEFAULT_PROPERTY_MAP.similarity(u_property, v_property);
+                                        if similarity < MIN_PROPERTY_SIMILARITY {
+                                            continue; // Skip this edge - properties incompatible
+                                        }
+                                    }
+                                }
+                            }
 
                             let bin_out = eprops.angle_bin;
                             let n_u = u_props.refraction_index;
@@ -184,7 +234,7 @@ pub fn propagate_light_with_pvs(
                                 continue;
                             }
 
-                            let v_idx = v as usize;
+                            // v_idx already checked above
                             if v_idx >= n {
                                 continue;
                             }
@@ -220,8 +270,6 @@ pub fn propagate_light_with_pvs(
 
                     frontier = next_frontier;
                 }
-            }
-        }
     }
 
     total_intensity

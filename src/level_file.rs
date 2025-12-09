@@ -203,11 +203,15 @@ fn read_node_props<R: Read>(reader: &mut R) -> std::io::Result<NodeProps> {
     let mut padding = [0u8; 3];
     reader.read_exact(&mut padding)?;
     
+    // Create uniform luminance for backward compatibility
+    use crate::property_map::create_uniform_luminance;
     Ok(NodeProps {
         luminance,
         reflection,
         refraction_index,
         default_angle_bin,
+        relationship_property: None,
+        directional_luminance: create_uniform_luminance(luminance),
     })
 }
 
@@ -501,12 +505,7 @@ mod tests {
     fn test_write_read_roundtrip() {
         // Create a simple graph
         let mut graph = Graph::new(3);
-        graph.set_node_props(0, NodeProps {
-            luminance: 1.0,
-            reflection: 0.9,
-            refraction_index: 1.0,
-            default_angle_bin: 0,
-        });
+        graph.set_node_props(0, NodeProps::from_uniform_luminance(1.0)).unwrap();
         // Set room assignments
         graph.set_room(0, 0).unwrap();
         graph.set_room(1, 0).unwrap();

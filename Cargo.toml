@@ -28,10 +28,18 @@ ndarray = "0.16"
 # LLM support
 llm-chain = "0.4"
 
-# CUDA support
-rustacuda = "0.1"
-rustacuda_core = "0.1"
+# CUDA support - migrating from rustacuda to cudarc for better resource management
+# rustacuda = "0.1"  # Disabled - has context stack management issues
+# rustacuda_core = "0.1"
+cudarc = { version = "0.18", features = ["driver", "nvrtc", "cuda-version-from-build-system"] }  # Modern CUDA bindings with better resource management
+
+# Lazy static for global property map
+lazy_static = "1.4"
 
 [dev-dependencies]
 criterion = "0.5"
+
+[[bench]]
+name = "directional_luminance"
+harness = false
 
