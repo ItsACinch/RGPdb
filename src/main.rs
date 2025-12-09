@@ -10,12 +10,7 @@ fn main() {
 
     let num_nodes = 3;
 
-    let default_node_props = graph::NodeProps {
-        luminance: 1.0,
-        reflection: 0.9,
-        refraction_index: 2.0,
-        default_angle_bin: 0,
-    };
+    let default_node_props = graph::NodeProps::from_uniform_luminance(1.0);
 
     // Adjacency list: each entry is Vec<(neighbor, EdgeProps)>
     let adj = vec![
@@ -47,30 +42,15 @@ fn main() {
     // Let's make node 0 a bit brighter and node 1 more reflective.
     graph.set_node_props(
         0,
-        graph::NodeProps {
-            luminance: 2.0,
-            reflection: 0.9,
-            refraction_index: 1.0,
-            default_angle_bin: 2,
-        },
+        graph::NodeProps::from_uniform_luminance(2.0),
     ).expect("Failed to set node 0 props");
     graph.set_node_props(
         1,
-        graph::NodeProps {
-            luminance: 0.5,
-            reflection: 0.8,
-            refraction_index: 2.0,
-            default_angle_bin: 2,
-        },
+        graph::NodeProps::from_uniform_luminance(0.5),
     ).expect("Failed to set node 1 props");
     graph.set_node_props(
         2,
-        graph::NodeProps {
-            luminance: 0.0,
-            reflection: 0.5,
-            refraction_index: 1.5,
-            default_angle_bin: 0,
-        },
+        graph::NodeProps::from_uniform_luminance(0.0),
     ).expect("Failed to set node 2 props");
 
     let params = propagation::LightParams {

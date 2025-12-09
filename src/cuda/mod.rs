@@ -2,9 +2,24 @@
 /// 
 /// This module provides GPU-accelerated propagation kernels.
 /// Requires CUDA toolkit and NVIDIA GPU.
+/// 
+/// MIGRATION NOTE: We're migrating from rustacuda to cudarc due to
+/// context stack management issues in rustacuda. The cudarc implementation
+/// provides better resource management and avoids cleanup crashes.
 
 mod kernels;
+mod cudarc_impl;
+mod ffi_bindings;
+mod direct_ffi_impl;
 
+// Use direct FFI implementation (most reliable)
+// For now, always try FFI first, fallback to cudarc if not available
+pub use direct_ffi_impl::*;
+
+// Legacy rustacuda implementation (kept for reference, not used)
+// Commented out to avoid conflicts - can be enabled if needed
+/*
+mod rustacuda_impl {
 use crate::graph::Graph;
 use crate::propagation::LightParams;
 use crate::pvs::PVS;
@@ -14,10 +29,20 @@ use rustacuda::launch;
 use thiserror::Error;
 
 /// CUDA context and device management
+/// 
+/// IMPORTANT: Drop order matters. Fields are dropped in reverse order:
+/// 1. module (must be dropped first)
+/// 2. _device
+/// 3. _context (must be dropped last to keep context active during module cleanup)
+/// 
+/// This struct manages a persistent CUDA context that stays alive for the lifetime
+/// of the application. The context is created with `create_and_push` which pushes it
+/// onto CUDA's context stack. As long as this struct is alive, the context remains
+/// active, allowing resources to be created and cleaned up safely.
 pub struct CudaContext {
-    _context: Context,
-    _device: Device,
-    module: Option<Module>,
+    module: Option<Module>,  // Drop first
+    _device: Device,         // Drop second
+    _context: Context,       // Drop last - keeps context active during module cleanup
 }
 
 impl CudaContext {
@@ -71,9 +96,9 @@ impl CudaContext {
         };
         
         Ok(Self {
-            _context: context,
-            _device: device,
-            module,
+            module,      // Drop first
+            _device: device,  // Drop second  
+            _context: context,  // Drop last - keeps context active during cleanup
         })
     }
     
@@ -118,6 +143,10 @@ pub enum CudaError {
 /// 1. Copies graph data to GPU memory
 /// 2. Launches propagation kernels
 /// 3. Copies results back to CPU
+/// 
+/// CRITICAL: Context must remain active throughout this function's execution
+/// and during resource cleanup. The context is stored in CudaContext and
+/// must outlive all resources created here.
 pub fn propagate_light_cuda(
     context: &CudaContext,
     graph: &Graph,
@@ -130,6 +159,12 @@ pub fn propagate_light_cuda(
     if context.module.is_none() {
         return Ok(crate::propagation::propagate_light(graph, source, initial_bin, params));
     }
+    
+    // CRITICAL: Ensure context is active before creating any resources
+    // The context from CudaContext should already be active (pushed by create_and_push)
+    // but we need to ensure it stays active during resource cleanup
+    
+    // GPU path: kernels are loaded, proceed with CUDA execution on GPU
     
     let num_nodes = graph.num_nodes();
     let num_angle_bins = params.num_angle_bins;
@@ -149,9 +184,12 @@ pub fn propagate_light_cuda(
         .map_err(|e| CudaError::MemoryAllocation(format!("Total intensity allocation: {}", e)))?;
     
     // Prepare and copy node properties to GPU
+    // Use average luminance from directional_luminance array
     let mut host_node_props = Vec::with_capacity(num_nodes * 4);
     for props in graph.node_props() {
-        host_node_props.push(props.luminance);
+        // Calculate average luminance from directional_luminance
+        let avg_luminance: f32 = props.directional_luminance.iter().sum::<f32>() / props.directional_luminance.len() as f32;
+        host_node_props.push(avg_luminance);
         host_node_props.push(props.reflection);
         host_node_props.push(props.refraction_index);
         host_node_props.push(props.default_angle_bin as f32);
@@ -178,6 +216,7 @@ pub fn propagate_light_cuda(
         .map_err(|e| CudaError::MemoryAllocation(format!("Edge props allocation: {}", e)))?;
     
     // Create stream for async operations
+    // CRITICAL: Must synchronize before stream is dropped
     let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
         .map_err(|e| CudaError::Runtime(format!("Failed to create stream: {}", e)))?;
     
@@ -251,14 +290,34 @@ pub fn propagate_light_cuda(
         use_first = !use_first;
     }
     
-    // Synchronize
+    // CRITICAL: Synchronize stream before copying results
+    // This ensures all kernel launches complete before we access results
     stream.synchronize()
         .map_err(|e| CudaError::Runtime(format!("Stream sync failed: {}", e)))?;
     
-    // Copy results back
+    // Copy results back to host BEFORE any resources are dropped
     let mut result = vec![0.0f32; num_nodes];
     dev_total_intensity.copy_to(&mut result)
         .map_err(|e| CudaError::MemoryCopy(format!("Result copy: {}", e)))?;
+    
+    // CRITICAL: Final synchronization to ensure copy completes
+    // All operations must complete while context is still active
+    stream.synchronize()
+        .map_err(|e| CudaError::Runtime(format!("Final sync failed: {}", e)))?;
+    
+    // RESOURCE CLEANUP:
+    // When this function returns, Rust will drop resources in reverse order:
+    // 1. stream (dropped last)
+    // 2. dev_edge_props, dev_col_idx, dev_row_ptr, dev_node_props, dev_total_intensity, dev_next_intensities, dev_intensities
+    //
+    // The context MUST remain active during this cleanup. Since context is stored
+    // in CudaContext (passed as &CudaContext), it should remain alive. However,
+    // rustacuda's context stack management may cause issues if the context was
+    // popped from the stack.
+    //
+    // WORKAROUND: We've synchronized the stream twice to ensure all operations
+    // complete. The context in CudaContext should keep it active, but if cleanup
+    // still fails, we may need to switch to a different CUDA binding library.
     
     Ok(result)
 }
@@ -313,3 +372,4 @@ mod tests {
         }
     }
 }
+*/ // End of rustacuda_impl module (commented out)

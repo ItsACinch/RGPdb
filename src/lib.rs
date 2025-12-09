@@ -9,6 +9,7 @@ pub mod embeddings;
 pub mod llm_integration;
 pub mod cuda;
 pub mod error;
+pub mod property_map;
 
 pub use graph::*;
 pub use propagation::*;
