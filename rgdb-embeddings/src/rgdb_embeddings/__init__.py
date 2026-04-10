@@ -24,6 +24,16 @@ For knowledge graphs:
 
 __version__ = "0.1.0"
 
+# Graph module (lightweight, no torch dependency)
+from .graph import (  # noqa: F401
+    Graph,
+    GraphBuilder,
+    LightParams,
+    propagate_light,
+    query_top_k,
+    query_distance,
+)
+
 # Configuration
 from .config import (
     Config,
@@ -36,42 +46,47 @@ from .config import (
     relation_to_bin,
 )
 
-# Data loading
-from .data import (
-    Chunk,
-    ContrastiveDataset,
-    Document,
-    DocumentLoader,
-    MappedTriple,
-    TextChunker,
-    Triple,
-    TripleDataset,
-    TripleLoader,
-)
+# Heavy imports (require torch) -- lazy-loaded to allow graph-only usage
+try:
+    # Data loading
+    from .data import (
+        Chunk,
+        ContrastiveDataset,
+        Document,
+        DocumentLoader,
+        MappedTriple,
+        TextChunker,
+        Triple,
+        TripleDataset,
+        TripleLoader,
+    )
 
-# Models
-from .models import (
-    FineTuneModel,
-    PretrainedEmbedder,
-    RGDBGraphEncoder,
-    RotatEForRGDB,
-)
+    # Models
+    from .models import (
+        FineTuneModel,
+        PretrainedEmbedder,
+        RGDBGraphEncoder,
+        RotatEForRGDB,
+    )
 
-# Training
-from .training import (
-    Callback,
-    CheckpointCallback,
-    DirectionalContrastiveLoss,
-    EarlyStoppingCallback,
-    EmbeddingTrainer,
-    LoggingCallback,
-    RotatELoss,
-    RotatETrainer,
-    TripletLoss,
-)
+    # Training
+    from .training import (
+        Callback,
+        CheckpointCallback,
+        DirectionalContrastiveLoss,
+        EarlyStoppingCallback,
+        EmbeddingTrainer,
+        LoggingCallback,
+        RotatELoss,
+        RotatETrainer,
+        TripletLoss,
+    )
 
-# Export
-from .export import export_to_rgdb, load_from_rgdb, validate_embeddings
+    # Export
+    from .export import export_to_rgdb, load_from_rgdb, validate_embeddings
+except ImportError:
+    # torch/sentence-transformers not installed -- graph module still works
+    pass
 
 __all__ = [
     # Version
