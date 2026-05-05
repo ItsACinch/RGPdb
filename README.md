@@ -1,4 +1,24 @@
 # Refractive Graph Database (RGDB)
+
+> ## ⚠️ Early Beta — Expect Breaking Changes
+>
+> **Status:** Early beta · **Version:** 0.7 · **Stability:** Experimental
+>
+> RGDB is under active development. APIs, file formats, and on-disk
+> representations are **not yet stable** and may change without notice between
+> commits. The light-propagation model itself is still being tuned.
+>
+> **Not recommended for production use.** Suitable for research,
+> experimentation, prototyping, and feedback. Pin to a specific git commit if
+> you depend on current behavior, and expect to migrate. For production use cases, please reach out to discuss roadmap and timelines for stability. At this time, I'd recommend limiting usage to proofs of concepts, experiments or for jupyter notebook exploration/stages.
+>
+> Issues, ideas, and PRs are very welcome — this is the right time to
+> influence the design.
+>
+> **Notes** This project has been under development on and off for several years. The current state is the result of multiple iterations and refactors. The core light propagation model has been stable for a while, but the API and file format have evolved significantly. The roadmap reflects the current plan, but may be adjusted as we learn from implementation and user feedback. We do have users reliably using RGDB in production for specific use cases, but the project as a whole is still in early beta due to limited user base.
+>
+> **Use at your own risk.** Please reach out if you have questions about stability or suitability for your use case. This project is provided "as is" without warranty of any kind. The author is not liable for any damages arising from the use of or inability to use this software.
+
 A new type of graph-based reasoning and similarity system using physically-inspired “light propagation” across a directional, partitioned graph.
 
 This project brief provides full background for developers, collaborators, and LLM-based engineering tools.
@@ -6,21 +26,46 @@ This project brief provides full background for developers, collaborators, and L
 ---
 
 # Table of Contents
+- [Refractive Graph Database (RGDB)](#refractive-graph-database-rgdb)
+- [Table of Contents](#table-of-contents)
 - [Concept Overview](#concept-overview)
 - [Motivation](#motivation)
 - [Core Ideas](#core-ideas)
+    - [1. Nodes are “materials”](#1-nodes-are-materials)
+    - [2. Edges are “optical paths”](#2-edges-are-optical-paths)
+    - [3. Influence propagation](#3-influence-propagation)
+    - [4. Room/portal structure](#4-roomportal-structure)
+    - [5. Level file storage](#5-level-file-storage)
 - [Mathematical Framework](#mathematical-framework)
+  - [Node properties](#node-properties)
+  - [Edge properties](#edge-properties)
+  - [Angular distance](#angular-distance)
+  - [Refraction factor](#refraction-factor)
+  - [Influence update](#influence-update)
+  - [Total influence](#total-influence)
+  - [Light-distance metric](#light-distance-metric)
 - [Node and Edge Properties](#node-and-edge-properties)
-- [Angle Bins and Refraction](#angle-bins-and-refraction)
-- [Propagation Algorithm](#propagation-algorithm)
-- [Rooms, Portals, and PVS](#rooms-portals-and-pvs)
-- [Level File Format](#level-file-format)
-- [Comparison to Vector Databases](#comparison-to-vector-databases)
-- [Proof of Concept (Rust Implementation)](#proof-of-concept-rust-implementation)
-- [Patent Summary](#patent-summary)
-- [Use Cases](#use-cases)
-- [Roadmap](#roadmap)
-- [License](#license)
+  - [Node](#node)
+  - [Angle Bins and Refraction](#angle-bins-and-refraction)
+  - [Propagation Algorithm](#propagation-algorithm)
+  - [Rooms, Portals, and PVS](#rooms-portals-and-pvs)
+    - [Rooms](#rooms)
+    - [Portals](#portals)
+    - [PVS (Potentially Visible Set)](#pvs-potentially-visible-set)
+  - [Level File Format](#level-file-format)
+  - [Comparison to Vector Databases](#comparison-to-vector-databases)
+  - [Proof of Concept (Rust Implementation)](#proof-of-concept-rust-implementation)
+  - [Features and Capabilities](#features-and-capabilities)
+    - [Phase 1 — Core Engine ✅ Done](#phase-1--core-engine--done)
+    - [Phase 2 — Rooms \& PVS ✅ Done](#phase-2--rooms--pvs--done)
+    - [Phase 3 — Level File Format ✅ Done](#phase-3--level-file-format--done)
+    - [Phase 4 — GPU Acceleration ✅ Done](#phase-4--gpu-acceleration--done)
+    - [Phase 5 — Query Engine ✅ Done (API server pending)](#phase-5--query-engine--done-api-server-pending)
+    - [Phase 6 — ML \& LLM Integration ✅ Done](#phase-6--ml--llm-integration--done)
+    - [Phase 7 — Python \& Jupyter Notebook Support ✅ Done](#phase-7--python--jupyter-notebook-support--done)
+    - [Phase 8 — Directional Luminance (in progress)](#phase-8--directional-luminance-in-progress)
+    - [Future Work](#future-work)
+  - [License](#license)
 
 ---
 
@@ -151,7 +196,7 @@ struct NodeProps {
     reflection: f32,
     refraction_index: f32
 }
-
+```
 ## Angle Bins and Refraction
 
 Angle bins represent a 2D semantic plane of directions and map relationship semantics into discrete orientations.
@@ -274,41 +319,66 @@ This produces:
 - light-distance per node
 Changing angle bins demonstrates refraction effects.
 
-## Roadmap
-### Phase 1 — Core Engine (done/ongoing)
+## Features and Capabilities
+
+### Phase 1 — Core Engine ✅ Done
 - CSR graph
 - node/edge properties
 - influence propagation
 - refraction model
 - Rust PoC
 
-### Phase 2 — Rooms & PVS
-- graph partitioning
+### Phase 2 — Rooms & PVS ✅ Done
+- graph partitioning (Connected Components, BFS)
 - portal detection
 - PVS computation
 - propagation pruning
 
-### Phase 3 — Level File Format
+### Phase 3 — Level File Format ✅ Done
 - binary writer/reader
 - aligned sections
 - mmap integration
 - versioning
 
-### Phase 4 — GPU Acceleration
-- CUDA/WGPU compute kernels
+### Phase 4 — GPU Acceleration ✅ Done
+- CUDA compute kernels (via `cudarc`)
 - frontier streaming
 - atomic intensity accumulation
+- memory optimization passes
+- See `docs/CUDA_COMPLETE.md` and `docs/CUDA_WEEK1_OPTIMIZATION_RESULTS.md`
 
-### Phase 5 — Query Engine / API
+### Phase 5 — Query Engine ✅ Done (API server pending)
 - top-k influence queries
 - distance queries
-- hybrid semantic queries
+- hybrid semantic queries (graph + vector similarity)
 - embedding export
+- ⏳ REST API server (Axum) — planned
 
-### Phase 6 — ML & LLM Integration
+### Phase 6 — ML & LLM Integration ✅ Done
 - multi-hop contextual embeddings
-- LM-driven queries
-- RAG with graph + physics reasoning
+- LLM-driven queries with intent classification
+- RAG module (`src/rag/`) combining propagation, vector search, and personalization
+- See `docs/LLM_INTEGRATION_GUIDE.md`
+
+### Phase 7 — Python & Jupyter Notebook Support ✅ Done
+- Pip-installable package: `rgdb-embeddings/`
+- Python bindings for graph construction and querying
+- `GraphBuilder` API for building graphs from pandas DataFrames in Jupyter
+- Query helpers returning pandas DataFrames for notebook workflows
+- Embedding training pipeline (pretrained, RotatE, GNN) with CLI:
+  `rgdb-embed process | train | evaluate | info`
+- See `rgdb-embeddings/README.md`
+
+### Phase 8 — Directional Luminance (in progress)
+- Per-angle-bin luminance emission (replacing uniform luminance)
+- `RelationshipProperty` enum and `PropertyAngleMap`
+- See `docs/DIRECTIONAL_LUMINANCE_PLAN.md`
+
+### Future Work
+- Ingestion pipeline (entity/relationship extraction)
+- Reasoning path tracking
+- Incremental graph updates
+- Monitoring and metrics
 
 ## License
 
@@ -320,3 +390,8 @@ required. Commercial and for-profit use is not permitted at this time.
 The copyright holder intends to permit commercial use in the future under terms
 to be announced. For commercial licensing inquiries in the meantime, contact
 maarten@acinch.com.
+
+> ⚠️ **No warranty. Use at your own risk.** RGDB is provided **as-is, without
+> warranty of any kind**, express or implied. The authors and copyright holders
+> accept no liability for any damages arising from its use. See the
+> [LICENSE](./LICENSE) file for the full disclaimer.
