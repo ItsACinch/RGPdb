@@ -20,6 +20,7 @@ This project brief provides full background for developers, collaborators, and L
 - [Patent Summary](#patent-summary)
 - [Use Cases](#use-cases)
 - [Roadmap](#roadmap)
+- [License](#license)
 
 ---
 
@@ -308,3 +309,14 @@ Changing angle bins demonstrates refraction effects.
 - multi-hop contextual embeddings
 - LM-driven queries
 - RAG with graph + physics reasoning
+
+## License
+
+**This is a temporary license.** RGDB is currently distributed under the
+[PolyForm Noncommercial License 1.0.0](./LICENSE). Free to use for personal,
+research, educational, and noncommercial open source projects, with attribution
+required. Commercial and for-profit use is not permitted at this time.
+
+The copyright holder intends to permit commercial use in the future under terms
+to be announced. For commercial licensing inquiries in the meantime, contact
+maarten@acinch.com.
