@@ -10,10 +10,12 @@ pub mod llm_integration;
 pub mod cuda;
 pub mod error;
 pub mod property_map;
+pub mod rag;
 
 pub use graph::*;
 pub use propagation::*;
 pub use partitioning::*;
 pub use rooms::*;
 pub use pvs::*;
+pub use rag::{RAGQueryEngine, QueryConfig, QueryResult, EmbeddingStore, IntentClassifier, QueryIntent, UserContext};
 

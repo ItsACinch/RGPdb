@@ -1,0 +1,13 @@
+[build-system]
+requires = ["maturin>=1.5,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "rgdb-core"
+version = "0.1.0"
+requires-python = ">=3.9"
+description = "Native Rust backend for RGDB graph propagation"
+
+[tool.maturin]
+features = ["pyo3/extension-module"]
+module-name = "rgdb_embeddings._rgdb_core"

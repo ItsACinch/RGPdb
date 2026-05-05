@@ -43,3 +43,4 @@ database_updated.rgdb
 
 # Documentation
 target/doc/
+**/__pycache__/**

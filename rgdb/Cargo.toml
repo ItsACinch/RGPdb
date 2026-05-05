@@ -1,0 +1,66 @@
+[package]
+name = "rgdb"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "rgdb"
+path = "src/lib.rs"
+
+[[bin]]
+name = "rgdb"
+path = "src/main.rs"
+
+[[bin]]
+name = "benchmark_cuda"
+path = "src/bin/benchmark_cuda.rs"
+required-features = ["cuda"]
+
+[[bin]]
+name = "benchmark_cuda_simple"
+path = "src/bin/benchmark_cuda_simple.rs"
+required-features = ["cuda"]
+
+[[bin]]
+name = "test_cuda_resources"
+path = "src/bin/test_cuda_resources.rs"
+required-features = ["cuda"]
+
+[[bin]]
+name = "benchmark_directional"
+path = "src/bin/benchmark_directional.rs"
+
+[features]
+default = []
+cuda = ["dep:cudarc"]
+llm = ["dep:llm-chain"]
+
+[dependencies]
+# Graph partitioning
+petgraph = "0.6"
+hashbrown = "0.14"
+
+# Binary I/O
+memmap2 = "0.9"
+byteorder = "1.5"
+bincode = "1.3"
+thiserror = "1.0"
+
+# Vector similarity
+ndarray = "0.16"
+
+# LLM support (optional)
+llm-chain = { version = "0.4", optional = true }
+
+# CUDA support (optional)
+cudarc = { version = "0.18", features = ["driver", "nvrtc", "cuda-version-from-build-system"], optional = true }
+
+# Lazy static for global property map
+lazy_static = "1.4"
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "directional_luminance"
+harness = false
