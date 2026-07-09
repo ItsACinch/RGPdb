@@ -50,3 +50,6 @@ target/doc/
 
 # Python editable-install metadata
 *.egg-info/
+
+# MetaQA dataset (fetched separately, not committed)
+rgdb-eval/data/MetaQA/
