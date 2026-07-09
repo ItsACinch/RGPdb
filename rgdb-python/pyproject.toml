@@ -11,3 +11,4 @@ description = "Native Rust backend for RGDB graph propagation"
 [tool.maturin]
 features = ["pyo3/extension-module"]
 module-name = "rgdb_embeddings._rgdb_core"
+python-source = "../rgdb-embeddings/src"

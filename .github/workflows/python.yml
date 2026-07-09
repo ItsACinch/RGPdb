@@ -1,0 +1,23 @@
+name: Python bindings
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  bindings:
+    name: maturin build + import
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install maturin
+      - run: pip install -e rgdb-embeddings
+      - run: pip install pandas
+      - run: maturin develop -m rgdb-python/Cargo.toml
+      - run: python rgdb-eval/scripts/smoke_bindings.py
