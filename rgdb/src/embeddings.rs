@@ -1,76 +1,39 @@
-/// Multi-hop contextual embedding generation
+//! Multi-source contextual embedding generation via propagation.
 
-use crate::graph::{Graph, NodeId, AngleBin};
-use crate::propagation::{propagate_light, propagate_light_with_pvs, LightParams};
-use crate::pvs::PVS;
+use crate::graph::{Graph, NodeId, RelationId};
+use crate::propagation::{propagate_single, PropagationParams};
+use crate::relation::RelationVocab;
 use ndarray::Array2;
 
-/// Generate embeddings from multiple source nodes
+/// One embedding column per (source, query_relation) pair, normalized to [0,1].
 pub fn generate_embeddings(
     graph: &Graph,
+    vocab: &RelationVocab,
     sources: &[NodeId],
-    initial_bins: &[AngleBin],
-    params: LightParams,
-    pvs: Option<&PVS>,
+    query_relations: &[Option<RelationId>],
+    params: &PropagationParams,
 ) -> Array2<f32> {
     let num_nodes = graph.num_nodes();
     let num_sources = sources.len();
-    
-    let mut embedding_matrix = Array2::zeros((num_nodes, num_sources));
-    
-    for (i, (&source, &initial_bin)) in sources.iter().zip(initial_bins.iter()).enumerate() {
-        let intensities = if let Some(pvs) = pvs {
-            propagate_light_with_pvs(graph, source, initial_bin, params, Some(pvs))
-        } else {
-            propagate_light(graph, source, initial_bin, params)
-        };
-        
-        // Normalize intensities
-        let max_intensity = intensities.iter().copied().fold(0.0f32, f32::max);
-        if max_intensity > 0.0 {
-            for (node_id, &intensity) in intensities.iter().enumerate() {
-                embedding_matrix[[node_id, i]] = intensity / max_intensity;
+    let mut m = Array2::zeros((num_nodes, num_sources));
+
+    for (i, (&src, &rel)) in sources.iter().zip(query_relations.iter()).enumerate() {
+        let totals = propagate_single(graph, vocab, src, 1.0, rel, params);
+        let max = totals.values().copied().fold(0.0f32, f32::max);
+        if max > 0.0 {
+            for (node, intensity) in &totals {
+                m[[*node as usize, i]] = intensity / max;
             }
         }
     }
-    
-    embedding_matrix
+    m
 }
 
-/// Generate embeddings with dimension reduction (PCA-like)
-pub fn generate_reduced_embeddings(
-    graph: &Graph,
-    sources: &[NodeId],
-    initial_bins: &[AngleBin],
-    target_dim: usize,
-    params: LightParams,
-    pvs: Option<&PVS>,
-) -> Array2<f32> {
-    // Generate full embeddings
-    let full_embeddings = generate_embeddings(graph, sources, initial_bins, params, pvs);
-    
-    // Simple dimension reduction: use first target_dim principal components
-    // For now, just take first target_dim columns (simplified)
-    let num_nodes = full_embeddings.nrows();
-    let num_cols = full_embeddings.ncols().min(target_dim);
-    
-    let mut reduced = Array2::zeros((num_nodes, target_dim));
-    for i in 0..num_nodes {
-        for j in 0..num_cols {
-            reduced[[i, j]] = full_embeddings[[i, j]];
-        }
-    }
-    
-    reduced
-}
-
-/// Export embeddings to numpy-compatible format (CSV for now)
+/// Export a dense embedding matrix as CSV.
 pub fn export_embeddings_csv(embeddings: &Array2<f32>, path: &str) -> std::io::Result<()> {
     use std::fs::File;
     use std::io::Write;
-    
     let mut file = File::create(path)?;
-    
     let (num_nodes, dim) = embeddings.dim();
     for i in 0..num_nodes {
         for j in 0..dim {
@@ -81,7 +44,5 @@ pub fn export_embeddings_csv(embeddings: &Array2<f32>, path: &str) -> std::io::R
         }
         writeln!(file)?;
     }
-    
     Ok(())
 }
-

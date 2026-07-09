@@ -2,7 +2,7 @@
 
 use thiserror::Error;
 
-pub type RelationId = u16;
+use crate::graph::RelationId;
 
 #[derive(Debug, Error)]
 pub enum RelationVocabError {

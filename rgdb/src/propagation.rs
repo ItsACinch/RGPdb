@@ -1,295 +1,218 @@
-use crate::graph::{Graph, NodeId, AngleBin};
-use crate::pvs::PVS;
-use crate::property_map::{RelationshipProperty, DEFAULT_PROPERTY_MAP};
+//! Sparse typed-PPR light propagation with path-internal refraction.
 
-/// Default minimum luminance value
-const DEFAULT_MIN_LUMINANCE: f32 = 1.0;
+use crate::graph::{Graph, NodeId, RelationId};
+use crate::relation::RelationVocab;
+use hashbrown::HashMap;
+use rayon::prelude::*;
 
-/// Minimum property similarity to allow propagation (early termination threshold)
-const MIN_PROPERTY_SIMILARITY: f32 = 0.2;
-
-/// Parameters for the light propagation.
+/// Propagation parameters.
 #[derive(Debug, Clone, Copy)]
-pub struct LightParams {
-    /// Global sharpness factor for refraction penalty.
-    pub k: f32,
-    /// Minimum intensity to keep propagating.
-    pub min_intensity: f32,
-    /// Maximum BFS-like depth (number of propagation steps).
+pub struct PropagationParams {
+    /// Maximum number of hops.
     pub max_depth: usize,
-    /// Number of angle bins (kept here so we can change it later).
-    pub num_angle_bins: usize,
+    /// Minimum mass to keep propagating (also prunes tiny contributions).
+    pub min_intensity: f32,
 }
 
-impl Default for LightParams {
+impl Default for PropagationParams {
     fn default() -> Self {
-        Self {
-            k: 5.0,
-            min_intensity: 1e-3,
-            max_depth: 4,
-            num_angle_bins: crate::graph::N_ANGLE_BINS,
-        }
+        Self { max_depth: 4, min_intensity: 1e-3 }
     }
 }
 
-/// Compute circular angular distance between two bins on [0, B).
-pub fn angular_distance(b1: AngleBin, b2: AngleBin, num_bins: usize) -> u8 {
-    let b1 = b1 as i32;
-    let b2 = b2 as i32;
-    let b = num_bins as i32;
-    let diff = (b1 - b2).abs();
-    let wrapped = b - diff;
-    diff.min(wrapped) as u8
-}
+/// Frontier key: a node reached via an incoming relation (None on the first
+/// hop of an untyped query).
+type FrontierKey = (NodeId, Option<RelationId>);
 
-/// Compute refraction factor ρ based on incoming/outgoing bins and node refraction index.
-///
-/// ρ = exp(-k * n * (Δ/B)^2)
-///
-/// # Safety
-/// Returns 0.0 if num_angle_bins is 0 to prevent division by zero.
-pub fn refraction_factor(
-    bin_in: AngleBin,
-    bin_out: AngleBin,
-    n: f32,
-    params: &LightParams,
-) -> f32 {
-    if params.num_angle_bins == 0 {
-        return 0.0; // Prevent division by zero
-    }
-    
-    let delta = angular_distance(bin_in, bin_out, params.num_angle_bins) as f32;
-    let b = params.num_angle_bins as f32;
-    
-    // Safe division - we already checked b != 0
-    let x = (delta / b).powi(2);
-    (-params.k * n * x).exp()
-}
-
-/// A single state in the frontier: node u, incoming direction bin, and intensity.
-#[derive(Debug, Clone, Copy)]
-pub struct FrontierState {
-    pub node: NodeId,
-    pub angle_bin: AngleBin,
-    pub intensity: f32,
-}
-
-/// Perform refractive light propagation from a source node and initial direction bin.
-///
-/// Returns: total intensity per node (I_total[node]) as a Vec<f32>.
-///
-/// # Panics
-/// Panics if source node is out of bounds. Use `propagate_light_with_pvs` for safe access.
-pub fn propagate_light(
+/// Multi-seed diffusion. Equivalent to summing single-seed diffusions (linear).
+pub fn propagate(
     graph: &Graph,
-    source: NodeId,
-    initial_bin: AngleBin,
-    params: LightParams,
-) -> Vec<f32> {
-    propagate_light_with_pvs(graph, source, initial_bin, params, None)
+    vocab: &RelationVocab,
+    seeds: &[(NodeId, f32)],
+    query_relation: Option<RelationId>,
+    params: &PropagationParams,
+) -> HashMap<NodeId, f32> {
+    seeds
+        .par_iter()
+        .map(|&(seed, mass)| propagate_single(graph, vocab, seed, mass, query_relation, params))
+        .reduce(HashMap::new, |mut acc, m| {
+            for (k, v) in m {
+                *acc.entry(k).or_insert(0.0) += v;
+            }
+            acc
+        })
 }
 
-/// Perform refractive light propagation with optional PVS pruning.
-///
-/// If pvs is Some, uses PVS to skip non-visible rooms during propagation.
-///
-/// # Panics
-/// Panics if source node is out of bounds or if index calculations overflow.
-pub fn propagate_light_with_pvs(
+/// Single-seed sparse diffusion. Returns total intensity per reached node
+/// (including the seed itself).
+pub fn propagate_single(
     graph: &Graph,
-    source: NodeId,
-    initial_bin: AngleBin,
-    params: LightParams,
-    pvs: Option<&PVS>,
-) -> Vec<f32> {
+    vocab: &RelationVocab,
+    seed: NodeId,
+    initial_mass: f32,
+    query_relation: Option<RelationId>,
+    params: &PropagationParams,
+) -> HashMap<NodeId, f32> {
+    let mut totals: HashMap<NodeId, f32> = HashMap::new();
     let n = graph.num_nodes();
-    let b = params.num_angle_bins;
-    
-    if n == 0 || b == 0 {
-        return Vec::new();
+    if (seed as usize) >= n || initial_mass < params.min_intensity {
+        return totals;
     }
 
-    // Intensities per (node, angle_bin) for current step.
-    let mut intensities = vec![0.0_f32; n * b];
-    // Total accumulated intensities per node.
-    let mut total_intensity = vec![0.0_f32; n];
+    *totals.entry(seed).or_insert(0.0) += initial_mass;
 
-    let src_idx = source as usize;
-    if src_idx >= n {
-        // Invalid source node - return zeros
-        return total_intensity;
-    }
-    
-    let src_props = graph.node_props()[src_idx];
+    let mut frontier: HashMap<FrontierKey, f32> = HashMap::new();
+    frontier.insert((seed, query_relation), initial_mass);
 
-    // Initialize frontier with directional or uniform luminance
-    let mut frontier = Vec::new();
-    
-    // NEW: Directional luminance initialization
-    if let Some(_property) = src_props.relationship_property {
-        // Emit in each direction based on directional_luminance
-        for angle_bin in 0..b {
-            let luminance = src_props.directional_luminance[angle_bin];
-            if luminance > params.min_intensity {
-                let angle_bin_u8 = angle_bin as AngleBin;
-                let src_intensity_idx = src_idx
-                    .checked_mul(b)
-                    .and_then(|x| x.checked_add(angle_bin));
-                
-                if let Some(idx) = src_intensity_idx {
-                    if idx < intensities.len() {
-                        intensities[idx] = luminance;
-                        total_intensity[src_idx] += luminance;
-                        frontier.push(FrontierState {
-                            node: source,
-                            angle_bin: angle_bin_u8,
-                            intensity: luminance,
-                        });
-                    }
+    // Lazily cache each node's out-weight sum (keeps cost proportional to the
+    // reached ball rather than the whole graph).
+    let mut denom_cache: HashMap<NodeId, f32> = HashMap::new();
+
+    for _depth in 0..params.max_depth {
+        if frontier.is_empty() {
+            break;
+        }
+        let mut next: HashMap<FrontierKey, f32> = HashMap::new();
+
+        for (&(u, r_in), &mass) in frontier.iter() {
+            if mass < params.min_intensity {
+                continue;
+            }
+            let u_idx = u as usize;
+            let props = graph.node_props()[u_idx];
+            let refl = props.reflection;
+            if refl <= 0.0 {
+                continue;
+            }
+            let rix = props.refraction_index;
+
+            let denom = *denom_cache.entry(u).or_insert_with(|| {
+                let mut s = 0.0f32;
+                for (_v, ep) in graph.neighbors(u) {
+                    s += (1.0 - ep.attenuation).max(0.0);
                 }
+                s
+            });
+            if denom <= 0.0 {
+                continue;
+            }
+
+            for (v, ep) in graph.neighbors(u) {
+                let base = (1.0 - ep.attenuation).max(0.0);
+                if base <= 0.0 {
+                    continue;
+                }
+                let p = base / denom;
+                let sim = match r_in {
+                    Some(a) => vocab.similarity(a, ep.relation),
+                    None => 1.0,
+                };
+                let sim_term = if rix == 1.0 { sim } else { sim.powf(rix) };
+                let transmitted = mass * refl * p * sim_term;
+                if transmitted < params.min_intensity {
+                    continue;
+                }
+                *totals.entry(v).or_insert(0.0) += transmitted;
+                *next.entry((v, Some(ep.relation))).or_insert(0.0) += transmitted;
             }
         }
-    } else {
-        // Fallback: Uniform emission (backward compatibility)
-        let initial_bin_idx = initial_bin as usize;
-        if initial_bin_idx < b {
-            let src_intensity_idx = src_idx
-                .checked_mul(b)
-                .and_then(|x| x.checked_add(initial_bin_idx));
-            
-            if let Some(idx) = src_intensity_idx {
-                if idx < intensities.len() {
-                    let initial_intensity = src_props.luminance.max(DEFAULT_MIN_LUMINANCE);
-                    intensities[idx] = initial_intensity;
-                    total_intensity[src_idx] += initial_intensity;
-                    frontier.push(FrontierState {
-                        node: source,
-                        angle_bin: initial_bin,
-                        intensity: initial_intensity,
-                    });
-                }
-            }
-        }
-    }
-    
-    // Continue with propagation if frontier is not empty
-    if !frontier.is_empty() {
-
-                for _depth in 0..params.max_depth {
-                    if frontier.is_empty() {
-                        break;
-                    }
-
-                    let mut next_frontier = Vec::new();
-
-                    for state in frontier.iter().copied() {
-                        let u = state.node;
-                        let u_idx = u as usize;
-                        if u_idx >= n {
-                            continue;
-                        }
-                        
-                        let bin_in = state.angle_bin;
-                        let intensity_in = state.intensity;
-                        if intensity_in < params.min_intensity {
-                            continue;
-                        }
-
-                        let u_props = graph.node_props()[u_idx];
-                        let reflected = intensity_in * u_props.reflection;
-                        let u_room = graph.get_room(u).unwrap_or(0);
-
-                        for (v, eprops) in graph.neighbors(u) {
-                            let v_room = graph.get_room(v).unwrap_or(0);
-                            
-                            // PVS pruning: skip if room is not visible
-                            if let Some(pvs) = pvs {
-                                if pvs.is_visible(u_room, bin_in, v_room).unwrap_or(false) == false {
-                                    continue;
-                                }
-                            }
-                            
-                            // NEW: Early termination - check property compatibility
-                            let v_idx = v as usize;
-                            if v_idx < n {
-                                let v_props = graph.node_props()[v_idx];
-                                if let Some(u_property) = u_props.relationship_property {
-                                    if let Some(v_property) = v_props.relationship_property {
-                                        // Check semantic compatibility
-                                        let similarity = DEFAULT_PROPERTY_MAP.similarity(u_property, v_property);
-                                        if similarity < MIN_PROPERTY_SIMILARITY {
-                                            continue; // Skip this edge - properties incompatible
-                                        }
-                                    }
-                                }
-                            }
-
-                            let bin_out = eprops.angle_bin;
-                            let n_u = u_props.refraction_index;
-                            let rho = refraction_factor(bin_in, bin_out, n_u, &params);
-                            let attenuation_factor = 1.0 - eprops.attenuation;
-                            let transmitted = reflected * attenuation_factor * rho;
-                            
-                            if transmitted < params.min_intensity {
-                                continue;
-                            }
-
-                            // v_idx already checked above
-                            if v_idx >= n {
-                                continue;
-                            }
-                            
-                            // Update per-angle intensity with bounds checking
-                            let bin_out_idx = bin_out as usize;
-                            if bin_out_idx < b {
-                                let v_intensity_idx = v_idx
-                                    .checked_mul(b)
-                                    .and_then(|x| x.checked_add(bin_out_idx));
-                                
-                                if let Some(idx) = v_intensity_idx {
-                                    if idx < intensities.len() {
-                                        // For PoC: just overwrite or max; for full: consider max or sum with atomic.
-                                        if transmitted > intensities[idx] {
-                                            intensities[idx] = transmitted;
-                                            next_frontier.push(FrontierState {
-                                                node: v,
-                                                angle_bin: bin_out,
-                                                intensity: transmitted,
-                                            });
-                                        }
-                                    }
-                                }
-                            }
-
-                            // Update total intensity accumulation per node.
-                            if v_idx < total_intensity.len() {
-                                total_intensity[v_idx] += transmitted;
-                            }
-                        }
-                    }
-
-                    frontier = next_frontier;
-                }
+        frontier = next;
     }
 
-    total_intensity
+    totals
 }
 
-/// Convert total intensity per node into a "light distance":
-/// d = -log(I + eps)
-///
-/// # Safety
-/// Returns infinity for negative intensities. Uses `eps` to prevent log(0).
+/// Convert intensity to a "light distance": d = -log(I + eps).
 pub fn intensity_to_distance(intensities: &[f32], eps: f32) -> Vec<f32> {
     intensities
         .iter()
         .map(|&i| {
             let value = i + eps;
-            if value > 0.0 {
-                -value.ln()
-            } else {
-                f32::INFINITY
-            }
+            if value > 0.0 { -value.ln() } else { f32::INFINITY }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::graph::{EdgeProps, Graph, NodeProps};
+    use crate::relation::RelationVocab;
+
+    fn chain() -> Graph {
+        // 0 -> 1 -> 2 -> 3, all relation 0, no attenuation.
+        let e = |dst| (dst, EdgeProps { attenuation: 0.0, relation: 0, is_portal: false });
+        let adj = vec![vec![e(1)], vec![e(2)], vec![e(3)], vec![]];
+        Graph::from_adjacency(4, adj, NodeProps::default()).unwrap()
+    }
+
+    #[test]
+    fn chain_decays_by_reflection() {
+        let g = chain();
+        let vocab = RelationVocab::uniform(1);
+        let params = PropagationParams { max_depth: 4, min_intensity: 1e-6 };
+        let t = propagate_single(&g, &vocab, 0, 1.0, Some(0), &params);
+        // reflection 0.85, p=1, sim=1 => geometric decay.
+        assert!((t[&0] - 1.0).abs() < 1e-6);
+        assert!((t[&1] - 0.85).abs() < 1e-5);
+        assert!((t[&2] - 0.7225).abs() < 1e-5);
+        assert!((t[&3] - 0.614125).abs() < 1e-5);
+    }
+
+    #[test]
+    fn refraction_penalizes_relation_turn() {
+        // 0 -(relA)-> 1 -(relB)-> 2 ; query relation = A.
+        let ea = (1u32, EdgeProps { attenuation: 0.0, relation: 0, is_portal: false });
+        let eb = (2u32, EdgeProps { attenuation: 0.0, relation: 1, is_portal: false });
+        let adj = vec![vec![ea], vec![eb], vec![]];
+        let g = Graph::from_adjacency(3, adj, NodeProps::default()).unwrap();
+        // sim(A,B) = 0.5
+        let vocab = RelationVocab::new(
+            vec!["A".into(), "B".into()],
+            vec![1.0, 0.5, 0.5, 1.0],
+        ).unwrap();
+        let params = PropagationParams { max_depth: 4, min_intensity: 1e-6 };
+        let refr = propagate_single(&g, &vocab, 0, 1.0, Some(0), &params);
+        // 1: 1*0.85*1*sim(A,A)=0.85 ; 2: 0.85*0.85*1*sim(A,B)=0.36125
+        assert!((refr[&1] - 0.85).abs() < 1e-5);
+        assert!((refr[&2] - 0.36125).abs() < 1e-5);
+
+        // With uniform vocab (no refraction), node 2 gets the full 0.7225.
+        let uni = RelationVocab::uniform(2);
+        let plain = propagate_single(&g, &uni, 0, 1.0, Some(0), &params);
+        assert!((plain[&2] - 0.7225).abs() < 1e-5);
+        assert!(refr[&2] < plain[&2]);
+    }
+
+    #[test]
+    fn sums_over_multiple_paths() {
+        // 0 -> 1 -> 2 and 0 -> 2 (two paths to node 2).
+        let e = |dst| (dst, EdgeProps { attenuation: 0.0, relation: 0, is_portal: false });
+        let adj = vec![vec![e(1), e(2)], vec![e(2)], vec![]];
+        let g = Graph::from_adjacency(3, adj, NodeProps::default()).unwrap();
+        let vocab = RelationVocab::uniform(1);
+        let params = PropagationParams { max_depth: 4, min_intensity: 1e-6 };
+        let t = propagate_single(&g, &vocab, 0, 1.0, Some(0), &params);
+        // node 0 has 2 out-edges => p=0.5 each.
+        // direct 0->2: 1*0.85*0.5 = 0.425
+        // via 1:   (0.425) then 1->2: 0.425*0.85*1 = 0.36125
+        // total node 2 = 0.425 + 0.36125 = 0.78625
+        assert!((t[&2] - 0.78625).abs() < 1e-5);
+    }
+
+    #[test]
+    fn multi_seed_equals_sum_of_singles() {
+        let g = chain();
+        let vocab = RelationVocab::uniform(1);
+        let params = PropagationParams { max_depth: 4, min_intensity: 1e-6 };
+        let combined = propagate(&g, &vocab, &[(0, 1.0), (1, 1.0)], Some(0), &params);
+        let a = propagate_single(&g, &vocab, 0, 1.0, Some(0), &params);
+        let b = propagate_single(&g, &vocab, 1, 1.0, Some(0), &params);
+        for node in 0..4u32 {
+            let expected = a.get(&node).copied().unwrap_or(0.0)
+                + b.get(&node).copied().unwrap_or(0.0);
+            let got = combined.get(&node).copied().unwrap_or(0.0);
+            assert!((got - expected).abs() < 1e-5, "node {node}");
+        }
+    }
 }

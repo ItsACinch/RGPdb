@@ -2,6 +2,7 @@
 name = "rgdb"
 version = "0.1.0"
 edition = "2021"
+default-run = "rgdb"
 
 [lib]
 name = "rgdb"
@@ -26,10 +27,6 @@ name = "test_cuda_resources"
 path = "src/bin/test_cuda_resources.rs"
 required-features = ["cuda"]
 
-[[bin]]
-name = "benchmark_directional"
-path = "src/bin/benchmark_directional.rs"
-
 [features]
 default = []
 cuda = ["dep:cudarc"]
@@ -48,6 +45,9 @@ thiserror = "1.0"
 
 # Vector similarity
 ndarray = "0.16"
+
+# Parallelism
+rayon = "1.10"
 
 # LLM support (optional)
 llm-chain = { version = "0.4", optional = true }

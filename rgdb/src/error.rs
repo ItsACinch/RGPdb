@@ -1,6 +1,6 @@
 /// Error types for RGDB operations
 
-use crate::graph::{NodeId, RoomId, AngleBin};
+use crate::graph::{NodeId, RoomId};
 use thiserror::Error;
 
 /// Errors for graph operations
@@ -20,33 +20,11 @@ pub enum GraphError {
     IntegerOverflow,
 }
 
-/// Errors for PVS operations
-#[derive(Debug, Error)]
-pub enum PVSError {
-    #[error("Invalid room ID: {0}")]
-    InvalidRoomId(RoomId),
-    #[error("Invalid angle bin: {0}")]
-    InvalidAngleBin(AngleBin),
-    #[error("Out of bounds: room_id={room_id}, angle_bin={angle_bin}, num_rooms={num_rooms}, num_angle_bins={num_angle_bins}")]
-    OutOfBounds {
-        room_id: RoomId,
-        angle_bin: AngleBin,
-        num_rooms: usize,
-        num_angle_bins: usize,
-    },
-    #[error("Integer overflow in index calculation")]
-    IntegerOverflow,
-    #[error("Room {0} is empty (no nodes)")]
-    EmptyRoom(RoomId),
-}
-
 /// Errors for propagation operations
 #[derive(Debug, Error)]
 pub enum PropagationError {
     #[error("Invalid source node: {0}")]
     InvalidSourceNode(NodeId),
-    #[error("Invalid angle bin: {0} (max: {1})")]
-    InvalidAngleBin(AngleBin, usize),
     #[error("Propagation failed: {0}")]
     PropagationFailed(String),
 }

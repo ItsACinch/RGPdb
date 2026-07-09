@@ -1,111 +1,45 @@
 /// Core graph structures for RGDB
 
 use crate::error::{GraphError, node_id_to_usize};
-use crate::property_map::RelationshipProperty;
 
 pub type NodeId = u32;
-pub type AngleBin = u8;
+pub type RelationId = u16;
 pub type RoomId = u32;
-
-/// Number of discrete angle bins (2D "semantic directions").
-pub const N_ANGLE_BINS: usize = 16;
 
 /// Maximum allowed nodes in a graph (prevents DoS)
 const MAX_NODES: usize = 100_000_000;
 /// Maximum allowed edges in a graph (prevents DoS)
 const MAX_EDGES: usize = 1_000_000_000;
 
-/// Physical-ish properties of a node.
+/// Per-node material properties.
 #[derive(Debug, Clone, Copy)]
 pub struct NodeProps {
-    /// Intrinsic emission from this node (deprecated: use directional_luminance).
-    /// Kept for backward compatibility. If relationship_property is None, this is used.
-    pub luminance: f32,
-    /// Fraction of incoming intensity that gets re-emitted.
+    /// Continuation probability (per-node damping), in [0,1].
     pub reflection: f32,
-    /// Refraction index controlling how strongly direction changes are penalized.
+    /// Exponent applied to relation-similarity (refraction sharpness).
     pub refraction_index: f32,
-    /// Default angle bin for this node (used for PVS computation).
-    pub default_angle_bin: AngleBin,
-    /// Relationship property that defines node's primary semantic direction (None = uniform emission).
-    pub relationship_property: Option<RelationshipProperty>,
-    /// Directional luminance: emission strength per angle bin.
-    /// If relationship_property is Some, this array defines how much light is emitted in each direction.
-    /// If relationship_property is None, all values should be equal (uniform emission).
-    pub directional_luminance: [f32; N_ANGLE_BINS],
 }
 
 impl Default for NodeProps {
     fn default() -> Self {
-        let uniform_lum = 1.0;
-        Self {
-            luminance: uniform_lum,
-            reflection: 1.0,
-            refraction_index: 1.0,
-            default_angle_bin: 0,
-            relationship_property: None,
-            directional_luminance: [uniform_lum; N_ANGLE_BINS],
-        }
+        Self { reflection: 0.85, refraction_index: 1.0 }
     }
 }
 
-impl NodeProps {
-    /// Create node props with uniform luminance (backward compatibility)
-    pub fn from_uniform_luminance(luminance: f32) -> Self {
-        Self {
-            luminance,
-            reflection: 1.0,
-            refraction_index: 1.0,
-            default_angle_bin: 0,
-            relationship_property: None,
-            directional_luminance: [luminance; N_ANGLE_BINS],
-        }
-    }
-    
-    /// Create node props with directional luminance
-    pub fn from_directional_luminance(
-        relationship_property: RelationshipProperty,
-        directional_luminance: [f32; N_ANGLE_BINS],
-    ) -> Self {
-        let peak_luminance = directional_luminance.iter().copied().fold(0.0, f32::max);
-        Self {
-            luminance: peak_luminance, // For backward compatibility
-            reflection: 1.0,
-            refraction_index: 1.0,
-            default_angle_bin: 0,
-            relationship_property: Some(relationship_property),
-            directional_luminance,
-        }
-    }
-    
-    /// Get effective luminance (peak for directional, uniform for scalar)
-    pub fn effective_luminance(&self) -> f32 {
-        if self.relationship_property.is_some() {
-            self.directional_luminance.iter().copied().fold(0.0, f32::max)
-        } else {
-            self.luminance
-        }
-    }
-}
-
-/// Physical-ish properties of an edge.
+/// Per-edge properties.
 #[derive(Debug, Clone, Copy)]
 pub struct EdgeProps {
-    /// Fraction of intensity lost along this edge.
+    /// Fraction of intensity lost along this edge, in [0,1].
     pub attenuation: f32,
-    /// Discrete direction bin for this relationship.
-    pub angle_bin: AngleBin,
-    /// Whether this edge is a portal (crosses room boundaries).
+    /// Relation type id (indexes into the RelationVocab).
+    pub relation: RelationId,
+    /// Whether this edge crosses a room boundary.
     pub is_portal: bool,
 }
 
 impl Default for EdgeProps {
     fn default() -> Self {
-        Self {
-            attenuation: 0.0,
-            angle_bin: 0,
-            is_portal: false,
-        }
+        Self { attenuation: 0.0, relation: 0, is_portal: false }
     }
 }
 
