@@ -256,12 +256,13 @@ pub fn write_level_file(
     let node_section_size = (graph.num_nodes() * 16) as u64; // 16 bytes per NodeProps (aligned)
     let edge_section_offset = node_section_offset + node_section_size;
     
-    // Edge section: row_ptr (u32 per entry), col_idx (u32 per entry), edge_props (8 bytes per entry)
+    // Edge section: row_ptr (u32 per entry), col_idx (u32 per entry), edge_props (8 bytes per entry), room_map (u32 count + u32 per node)
     let row_ptr_size = ((graph.num_nodes() + 1) * 4) as u64;
     let col_idx_size = (graph.num_edges() * 4) as u64;
     let edge_props_size = (graph.num_edges() * 8) as u64;
-    let edge_section_size = row_ptr_size + col_idx_size + edge_props_size;
-    
+    let room_map_size = (4 + graph.num_nodes() * 4) as u64; // 4 bytes for count + 4 bytes per room_id
+    let edge_section_size = row_ptr_size + col_idx_size + edge_props_size + room_map_size;
+
     let rooms_section_offset = edge_section_offset + edge_section_size;
     // Rooms section: room_count (u32) + per room: id (u32), start (u32), count (u32)
     let rooms_section_size = (4 + rooms.num_rooms() * 12) as u64;
@@ -367,7 +368,7 @@ pub fn read_level_file_mmap(path: &str) -> Result<(Graph, RoomCollection, PVS), 
     if header.node_section_offset >= file_size
         || header.edge_section_offset >= file_size
         || header.rooms_section_offset >= file_size
-        || header.pvs_section_offset >= file_size
+        || header.pvs_section_offset > file_size
     {
         return Err(LevelFileError::StructureMismatch(
             "Section offsets exceed file size".to_string(),
@@ -377,7 +378,7 @@ pub fn read_level_file_mmap(path: &str) -> Result<(Graph, RoomCollection, PVS), 
     // Validate offsets are in ascending order
     if !(header.node_section_offset < header.edge_section_offset
         && header.edge_section_offset < header.rooms_section_offset
-        && header.rooms_section_offset < header.pvs_section_offset)
+        && header.rooms_section_offset <= header.pvs_section_offset)
     {
         return Err(LevelFileError::StructureMismatch(
             "Section offsets not in ascending order".to_string(),
@@ -388,7 +389,7 @@ pub fn read_level_file_mmap(path: &str) -> Result<(Graph, RoomCollection, PVS), 
     if header.node_section_offset as usize >= mmap.len()
         || header.edge_section_offset as usize >= mmap.len()
         || header.rooms_section_offset as usize >= mmap.len()
-        || header.pvs_section_offset as usize >= mmap.len()
+        || header.pvs_section_offset as usize > mmap.len()
     {
         return Err(LevelFileError::StructureMismatch(
             "Section offsets exceed memory map size".to_string(),
@@ -504,7 +505,7 @@ mod tests {
     #[test]
     fn test_write_read_roundtrip() {
         // Create a simple graph
-        let mut graph = Graph::new(3);
+        let mut graph = Graph::new(3).unwrap();
         graph.set_node_props(0, NodeProps::from_uniform_luminance(1.0)).unwrap();
         // Set room assignments
         graph.set_room(0, 0).unwrap();
