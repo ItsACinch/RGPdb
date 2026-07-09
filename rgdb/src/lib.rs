@@ -7,7 +7,7 @@ pub mod queries;
 pub mod embeddings;
 pub mod relation;
 pub mod error;
-// pub mod rag;          // Task 3
+pub mod rag;
 
 #[cfg(feature = "llm")]
 pub mod llm_integration;
@@ -20,3 +20,4 @@ pub use propagation::*;
 pub use partitioning::*;
 pub use rooms::*;
 pub use relation::*;
+pub use rag::{RAGQueryEngine, QueryConfig, QueryResult, EmbeddingStore, IntentClassifier, QueryIntent, UserContext};

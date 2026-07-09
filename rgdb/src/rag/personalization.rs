@@ -1,6 +1,6 @@
 //! User context and personalization for RAG queries
 
-use crate::graph::{NodeId, RoomId, N_ANGLE_BINS};
+use crate::graph::{NodeId, RoomId};
 use std::collections::{HashMap, HashSet};
 
 /// User context for personalized retrieval
@@ -8,10 +8,6 @@ use std::collections::{HashMap, HashSet};
 pub struct UserContext {
     /// User identifier
     pub user_id: String,
-
-    /// Topic affinity scores (0.0-1.0) per angle bin
-    /// Higher values = user is more interested in this relationship type
-    pub topic_affinities: [f32; N_ANGLE_BINS],
 
     /// Interaction history: node_id -> interaction count
     pub interaction_history: HashMap<NodeId, u32>,
@@ -32,7 +28,6 @@ impl UserContext {
     pub fn new(user_id: impl Into<String>) -> Self {
         Self {
             user_id: user_id.into(),
-            topic_affinities: [1.0; N_ANGLE_BINS], // Neutral by default
             interaction_history: HashMap::new(),
             session_nodes: Vec::new(),
             accessible_rooms: HashSet::new(), // Empty = all accessible
@@ -51,13 +46,6 @@ impl UserContext {
         // Limit session history size
         const MAX_SESSION_NODES: usize = 100;
         self.session_nodes.truncate(MAX_SESSION_NODES);
-    }
-
-    /// Set topic affinity for a specific angle bin
-    pub fn set_topic_affinity(&mut self, angle_bin: usize, affinity: f32) {
-        if angle_bin < N_ANGLE_BINS {
-            self.topic_affinities[angle_bin] = affinity.clamp(0.0, 1.0);
-        }
     }
 
     /// Add accessible room (for access control)
@@ -97,27 +85,6 @@ impl UserContext {
         }
 
         boost
-    }
-
-    /// Modulate directional luminance based on user preferences
-    pub fn modulate_luminance(&self, original: [f32; N_ANGLE_BINS]) -> [f32; N_ANGLE_BINS] {
-        let mut modulated = original;
-        for i in 0..N_ANGLE_BINS {
-            modulated[i] *= self.topic_affinities[i];
-        }
-        modulated
-    }
-
-    /// Get the user's preferred angle bins (sorted by affinity, highest first)
-    pub fn preferred_bins(&self) -> Vec<(usize, f32)> {
-        let mut bins: Vec<(usize, f32)> = self
-            .topic_affinities
-            .iter()
-            .enumerate()
-            .map(|(i, &a)| (i, a))
-            .collect();
-        bins.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
-        bins
     }
 
     /// Get nodes to seed activity feed (recent + high-interaction)
@@ -161,13 +128,6 @@ impl Default for UserContext {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_user_context_creation() {
-        let ctx = UserContext::new("user123");
-        assert_eq!(ctx.user_id, "user123");
-        assert_eq!(ctx.topic_affinities, [1.0; N_ANGLE_BINS]);
-    }
 
     #[test]
     fn test_record_interaction() {

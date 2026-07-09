@@ -8,10 +8,10 @@
 
 pub mod embedding_store;
 pub mod intent;
-pub mod query_engine;
 pub mod personalization;
+pub mod query_engine;
 
 pub use embedding_store::EmbeddingStore;
-pub use intent::{QueryIntent, IntentClassifier};
-pub use query_engine::{RAGQueryEngine, QueryConfig, QueryResult};
+pub use intent::{IntentClassifier, QueryIntent};
 pub use personalization::UserContext;
+pub use query_engine::{QueryConfig, QueryResult, RAGQueryEngine};

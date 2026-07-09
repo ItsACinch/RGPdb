@@ -1,7 +1,4 @@
-//! Query intent classification for mapping natural language to angle bins
-
-use crate::graph::AngleBin;
-use crate::property_map::RelationshipProperty;
+//! Query intent classification for mapping natural language to relation names
 
 /// Query intent types that map to semantic directions
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,49 +28,20 @@ pub enum QueryIntent {
 }
 
 impl QueryIntent {
-    /// Map intent to primary angle bin
-    pub fn to_angle_bin(&self) -> AngleBin {
+    /// Canonical relation name for this intent (looked up in the graph's vocab).
+    pub fn relation_name(&self) -> &'static str {
         match self {
-            Self::Definition => 0,   // IsA
-            Self::Requirements => 1, // Requires
-            Self::Association => 2,  // RelatedTo
-            Self::Causation => 4,    // Causes
-            Self::Composition => 6,  // Contains
-            Self::Membership => 8,   // PartOf
-            Self::Similarity => 10,  // SimilarTo
-            Self::Contrast => 12,    // OppositeOf
-            Self::Capability => 14,  // Enables
-            Self::Conflict => 15,    // ConflictsWith
-            Self::MultiHop => 2,     // Default to RelatedTo for broad exploration
-        }
-    }
-
-    /// Get related angle bins for multi-direction queries
-    pub fn related_bins(&self) -> Vec<AngleBin> {
-        match self {
-            Self::Definition => vec![0, 8],         // IsA + PartOf
-            Self::Causation => vec![4, 14, 1],      // Causes + Enables + Requires
-            Self::Composition => vec![6, 8],        // Contains + PartOf
-            Self::Similarity => vec![10, 2],        // SimilarTo + RelatedTo
-            Self::MultiHop => vec![0, 2, 4, 6, 8, 10], // Explore broadly
-            _ => vec![self.to_angle_bin()],
-        }
-    }
-
-    /// Get the corresponding RelationshipProperty
-    pub fn to_relationship_property(&self) -> RelationshipProperty {
-        match self {
-            Self::Definition => RelationshipProperty::IsA,
-            Self::Requirements => RelationshipProperty::Requires,
-            Self::Association => RelationshipProperty::RelatedTo,
-            Self::Causation => RelationshipProperty::Causes,
-            Self::Composition => RelationshipProperty::Contains,
-            Self::Membership => RelationshipProperty::PartOf,
-            Self::Similarity => RelationshipProperty::SimilarTo,
-            Self::Contrast => RelationshipProperty::OppositeOf,
-            Self::Capability => RelationshipProperty::Enables,
-            Self::Conflict => RelationshipProperty::ConflictsWith,
-            Self::MultiHop => RelationshipProperty::RelatedTo,
+            Self::Definition => "IsA",
+            Self::Requirements => "Requires",
+            Self::Association => "RelatedTo",
+            Self::Causation => "Causes",
+            Self::Composition => "Contains",
+            Self::Membership => "PartOf",
+            Self::Similarity => "SimilarTo",
+            Self::Contrast => "OppositeOf",
+            Self::Capability => "Enables",
+            Self::Conflict => "ConflictsWith",
+            Self::MultiHop => "RelatedTo",
         }
     }
 }
@@ -273,19 +241,5 @@ mod tests {
         // Generic queries should default to Association
         assert_eq!(classifier.classify("Tell me about Python"), QueryIntent::Association);
         assert_eq!(classifier.classify("Python programming"), QueryIntent::Association);
-    }
-
-    #[test]
-    fn test_angle_bin_mapping() {
-        assert_eq!(QueryIntent::Definition.to_angle_bin(), 0);
-        assert_eq!(QueryIntent::Causation.to_angle_bin(), 4);
-        assert_eq!(QueryIntent::Similarity.to_angle_bin(), 10);
-    }
-
-    #[test]
-    fn test_related_bins() {
-        let bins = QueryIntent::MultiHop.related_bins();
-        assert!(bins.len() > 1);
-        assert!(bins.contains(&2)); // RelatedTo
     }
 }
