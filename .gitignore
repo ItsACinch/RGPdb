@@ -47,3 +47,6 @@ target/doc/
 **/__pycache__/**
 # Python virtual environment for rgdb-eval (Python 3.12, PyO3 0.23 compatible)
 .venv/
+
+# Python editable-install metadata
+*.egg-info/
