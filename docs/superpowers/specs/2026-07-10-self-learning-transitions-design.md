@@ -39,10 +39,32 @@ learns from its own use (**B**).
 
 **Out (deferred):**
 - **C.** Query-conditioned per-hop relation schedules / RotatE composition, for the
-  residual 3-hop gap. Unvalidated. See the linked doc — it carries a mandatory
-  validation experiment that must pass before any of it is designed. Note that **B
-  is a prerequisite for C**: the credit pass recovers the reasoning chains a
-  schedule predictor would train on.
+  residual 3-hop gap. Its mandatory validation gate was **run on 2026-07-10 and
+  failed** (3-hop MRR 0.254–0.260 vs untyped-PPR's 0.279); **C was not built**, and
+  the gate itself is now retired as mis-specified. See the linked doc for the
+  verdict and the three-part replacement gate. **B remains a prerequisite for C**:
+  the credit pass recovers the reasoning chains a schedule predictor would train on.
+
+## Known limitation: the learned matrix regresses 3-hop retrieval
+
+Shipping caveat, measured, not hypothetical. The trained/online-learned matrix
+sharpens toward relation *coherence*, which is right for shallow retrieval and
+wrong for deep composition (which requires changing relation type between hops).
+On MetaQA it recovers 1-hop and improves 2-hop, but drives 3-hop MRR **below both
+its own uniform ablation and plain untyped PPR**.
+
+The 2026-07-10 gate experiment identified the cause, and it is not the matrix.
+`propagate()` accumulates intensity at **every visited node**, and every hop
+multiplies by `reflection · p(u→v) < 1`, so a hop-1 neighbour on the correct chain
+necessarily outranks the hop-3 answer on that same chain. Sharpening the matrix
+concentrates mass along the correct chain, which makes the intermediates *stronger*
+competitors to the answer. Better relation modelling makes this worse, not better,
+until scoring becomes depth-aware.
+
+**Guidance:** 3-hop-heavy workloads should keep the matrix uniform
+(`RelationVocab::uniform`, i.e. refraction disabled) until depth-aware scoring
+lands — terminal-mass accumulation or an exactly-`k` restriction. That fix is a
+prerequisite for C, and it is a smaller change than C. It is *not* blocked on C.
 
 ---
 
