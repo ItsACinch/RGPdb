@@ -19,8 +19,14 @@ def build_rankers(graph, node_vecs, question_vec):
     try:
         from .rankers.rgdb_current import CurrentRgdbRanker
         rankers.append(CurrentRgdbRanker(graph))
-    except Exception as exc:  # bindings not installed -> skip, but say so
+    except Exception as exc:
         print(f"[warn] rgdb-current contender skipped: {exc}")
+    try:
+        from .rankers.rgdb_new import NewRgdbRanker
+        rankers.append(NewRgdbRanker(graph, vocab_mode="uniform"))
+        rankers.append(NewRgdbRanker(graph, vocab_mode="refraction"))
+    except Exception as exc:
+        print(f"[warn] rgdb-new contenders skipped: {exc}")
     return rankers
 
 
