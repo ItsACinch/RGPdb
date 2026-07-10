@@ -191,15 +191,30 @@ mod tests {
     }
 
     #[test]
-    fn rebuild_resets_counter_and_applies_decay() {
-        let names: Vec<String> = vec!["a".into(), "b".into()];
+    fn rebuild_derives_before_decaying_then_resets() {
+        // n=3 with lopsided counts, so the derived matrix depends on the
+        // counts:prior ratio -- which is exactly what decay changes.
+        let names: Vec<String> = vec!["a".into(), "b".into(), "c".into()];
         let cfg = TransitionConfig { decay: 0.5, ..TransitionConfig::default() };
         let mut s = TransitionStore::new(names, None, cfg).unwrap();
-        s.record(&[(0, 1, 1.0)], 8.0);
+        s.record(&[(0, 1, 1.0)], 100.0);
         assert_eq!(s.events_since_rebuild(), 1);
-        let _ = s.rebuild();
+
+        let v = s.rebuild();
+
+        // Derived BEFORE decay: C'[0][1] = 100 + 10 = 110, C'[0][2] = 0 + 10 = 10,
+        // off-diagonal rowmax = 110 => sim(0,2) = 10/110.
+        // Had it decayed first: C'[0][1] = 50 + 10 = 60 => sim(0,2) = 10/60 = 0.1667,
+        // which this assertion rejects.
+        assert!(
+            (v.similarity(0, 2) - (10.0 / 110.0)).abs() < 1e-5,
+            "rebuild() must derive before decaying; got sim(0,2) = {}",
+            v.similarity(0, 2)
+        );
+        // Decay is applied to counts afterwards.
+        assert_eq!(s.counts()[0 * 3 + 1], 50.0);
+        // Event counter is reset.
         assert_eq!(s.events_since_rebuild(), 0);
-        assert_eq!(s.counts()[1], 4.0, "decay applied after derive");
     }
 
     #[test]
