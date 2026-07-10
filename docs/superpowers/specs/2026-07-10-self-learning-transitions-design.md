@@ -152,6 +152,20 @@ therefore retains the `Arc<RelationVocab>` used at query time and hands it to
 `credit()`. Attributing flow under a different matrix than the one that generated the
 answer would silently mis-credit every transition.
 
+**Known limitation — pruning bias, and why cold start mitigates it.** The forward
+pass prunes states below `min_intensity`; the backward DP does not. With pruning on
+(production default `1e-3`), a transition the current matrix *penalizes* carries less
+mass, reaches the threshold sooner, and is more likely dropped from the ball — so it
+receives systematically less credit than its true unpruned share. Credit is
+flow-proportional by design, so some of this is intended; pruning amplifies it, and it
+is potentially **self-reinforcing**: a penalized transition earns less evidence, so it
+stays penalized.
+
+The do-no-harm uniform cold start is what keeps this benign. When learning begins every
+similarity is exactly `1.0`, so there is no differential pruning at the moment the first
+evidence is gathered — the matrix cannot lock in a bias it has not yet acquired. Callers
+who need exact, unbiased credit can pass `min_intensity = 0.0` to the credit path.
+
 **Correctness invariant (the property test).** Note that `Σ flow` is *not* the
 target's mass — the decomposition counts each path once per edge, so `Σ flow` equals
 the **length-weighted** mass `Σ_paths length·weight`. The clean cross-check between
