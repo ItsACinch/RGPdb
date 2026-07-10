@@ -20,7 +20,7 @@ def parse_qa_line(line: str) -> tuple[str, list[str]]:
     return topic, answers
 
 
-def load_kb_from_lines(lines: list[str]) -> TypedGraph:
+def load_kb_from_lines(lines: list[str], add_inverse: bool = True) -> TypedGraph:
     names: dict[str, int] = {}
     rels: dict[str, int] = {}
     triples: list[tuple[str, str, str]] = []
@@ -41,7 +41,14 @@ def load_kb_from_lines(lines: list[str]) -> TypedGraph:
             continue
         h, r, t = parse_kb_line(line)
         triples.append((h, r, t))
-        edges.append((nid(h), nid(t), rid(r)))
+        hi, ti = nid(h), nid(t)
+        edges.append((hi, ti, rid(r)))
+        if add_inverse:
+            # Add the inverse edge so the graph is navigable both ways (KGQA
+            # standard: MetaQA questions traverse relations in either direction).
+            # Kept as a DISTINCT relation type ("<r>_inv") so refraction can still
+            # tell a forward hop from a reverse one.
+            edges.append((ti, hi, rid(r + "_inv")))
 
     entity_names = [""] * len(names)
     for name, i in names.items():
@@ -53,9 +60,9 @@ def load_kb_from_lines(lines: list[str]) -> TypedGraph:
                       relations=relations, edges=edges)
 
 
-def load_kb(kb_path: str) -> TypedGraph:
+def load_kb(kb_path: str, add_inverse: bool = True) -> TypedGraph:
     with open(kb_path, encoding="utf-8") as f:
-        return load_kb_from_lines(f.readlines())
+        return load_kb_from_lines(f.readlines(), add_inverse=add_inverse)
 
 
 def load_questions(qa_path: str, hop: int, graph: TypedGraph,

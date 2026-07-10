@@ -78,3 +78,7 @@ def _evaluate_with_question_embeddings(ranker, questions):
             return r
         ranker.rank = ranked
     return evaluate(ranker, questions)
+
+
+if __name__ == "__main__":
+    main()

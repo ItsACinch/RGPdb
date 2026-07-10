@@ -19,7 +19,14 @@ def test_load_kb_from_lines_builds_typed_graph():
         "Blade Runner|directed_by|Ridley Scott",
         "Alien|directed_by|Ridley Scott",
     ]
+    # default add_inverse=True: each triple yields a forward + an inverse edge
     g = load_kb_from_lines(lines)
-    assert g.num_nodes == 3          # 2 movies + 1 director
+    assert g.num_nodes == 3          # 2 movies + 1 director (inverse edges add no nodes)
     assert "directed_by" in g.relation_to_id
-    assert len(g.edges) == 2
+    assert "directed_by_inv" in g.relation_to_id  # inverse relation added
+    assert len(g.edges) == 4         # 2 forward + 2 inverse
+
+    # add_inverse=False restores forward-only loading
+    g_fwd = load_kb_from_lines(lines, add_inverse=False)
+    assert len(g_fwd.edges) == 2
+    assert "directed_by_inv" not in g_fwd.relation_to_id
