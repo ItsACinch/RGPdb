@@ -108,9 +108,23 @@ Do the cheap upper-bound test first. It can kill the idea in an afternoon.
 1. Parse the **full gold relation sequence** from each MetaQA test qtype
    (`qtype_to_relation_sequence` already exists in `rgdb-eval/rgdb_eval/metaqa.py`
    and returns exactly this).
-2. Feed that sequence to the kernel as a per-hop `expected[k]`, scoring each hop as
-   `sim(edge_relation, expected[k])` instead of `sim(prev_edge, edge)`.
-   This requires a kernel variant that accepts a schedule.
+2. Feed that sequence to the kernel as a per-hop `expected[k]`.
+
+   **No kernel change is required** (this doc originally claimed otherwise). The
+   kernel's `r_in` *is* the relation traversed on the previous hop, so a per-hop
+   schedule is exactly expressible in the existing `sim(r_in, r_out)` matrix, given
+   one synthetic relation:
+
+   - Add `__START__` as relation id `n` (the graph's edges never use it).
+   - Seed the query with `query_relation = __START__`.
+   - Build a per-question matrix: everything at `floor`, except
+     `M[__START__][r1] = 1.0` and `M[r_i][r_{i+1}] = 1.0` for `i = 1..k-1`.
+
+   Hop 1 then scores `sim(__START__, e)` — rewarding only `r1`. After traversing
+   `r1`, `r_in = r1`, so hop 2 scores `sim(r1, e)` — rewarding only `r2`. And so on.
+   Hops past the schedule find only `floor` and are suppressed. A per-question
+   19x19 matrix is 361 floats; the experiment is pure Python over the existing
+   bindings.
 3. Re-run 1/2/3-hop and compare against the numbers in the table above.
 
 **Pass/fail:**
