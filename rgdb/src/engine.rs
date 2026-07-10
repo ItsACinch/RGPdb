@@ -105,9 +105,15 @@ impl RgdbEngine {
     /// Restore learned state from a sidecar, validating relation coverage.
     pub fn load(graph: Graph, path: &str) -> Result<Self, TransitionError> {
         let store = TransitionStore::load(path)?;
-        let graph_max = graph.edge_props().iter().map(|e| e.relation as usize).max().unwrap_or(0);
-        if store.len() <= graph_max {
-            return Err(TransitionError::RelationCoverage { store_len: store.len(), graph_max });
+        // Only enforce coverage when the graph actually uses relations. An edgeless
+        // graph vacuously satisfies any vocabulary, including an empty one.
+        if let Some(graph_max) = graph.edge_props().iter().map(|e| e.relation as usize).max() {
+            if store.len() <= graph_max {
+                return Err(TransitionError::RelationCoverage {
+                    store_len: store.len(),
+                    graph_max,
+                });
+            }
         }
         let vocab = store.derive_vocab();
         Ok(Self::assemble(graph, store, vocab, EngineConfig::default()))
@@ -304,5 +310,33 @@ mod tests {
         let e2 = RgdbEngine::load(g, path).unwrap();
         assert_eq!(e2.counts_snapshot(), e.counts_snapshot());
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn expired_query_context_errors_and_is_evicted() {
+        use std::time::Duration;
+        let ea = (1u32, EdgeProps { attenuation: 0.0, relation: 0, is_portal: false });
+        let eb = (2u32, EdgeProps { attenuation: 0.0, relation: 1, is_portal: false });
+        let g = Graph::from_adjacency(3, vec![vec![ea], vec![eb], vec![]], NodeProps::default()).unwrap();
+        let prior = RelationVocab::with_names_uniform(vec!["A".into(), "B".into()]);
+        let e = RgdbEngine::with_engine_config(
+            g,
+            prior,
+            TransitionConfig { rebuild_every_n: 0, ..TransitionConfig::default() },
+            EngineConfig { cache_capacity: 8, cache_ttl: Duration::from_millis(1) },
+        );
+        let r = e.query(&[(0, 1.0)], Some(0), &params());
+        std::thread::sleep(Duration::from_millis(10));
+
+        // Expired: must error, never silently use the stale context.
+        assert!(matches!(
+            e.record_feedback(r.query_id, 2, 1.0),
+            Err(FeedbackError::UnknownQuery(_))
+        ));
+        // And it was popped, so a second attempt errors too.
+        assert!(matches!(
+            e.record_feedback(r.query_id, 2, 1.0),
+            Err(FeedbackError::UnknownQuery(_))
+        ));
     }
 }

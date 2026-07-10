@@ -23,9 +23,12 @@ pub use propagation::*;
 pub use partitioning::*;
 pub use rooms::*;
 pub use relation::*;
-// NOTE: `rag::QueryResult` is intentionally left out of this re-export — it would
-// collide with `engine::QueryResult` below (both are `pub use ... QueryResult`
-// at the crate root, which is E0252). It remains reachable as `rag::QueryResult`.
-pub use rag::{RAGQueryEngine, QueryConfig, EmbeddingStore, IntentClassifier, QueryIntent, UserContext};
-pub use engine::{EngineConfig, FeedbackError, QueryId, QueryResult, RgdbEngine};
+// NOTE: `engine::QueryResult` and `rag::QueryResult` are structurally unrelated
+// types that happen to share a name (E0252 if both re-exported bare). Re-export
+// each under a distinct alias so a stale `use rgdb::QueryResult;` fails to
+// compile immediately instead of silently resolving to the wrong type. Both
+// remain reachable at their module paths too (`rgdb::engine::QueryResult`,
+// `rgdb::rag::QueryResult`).
+pub use engine::{EngineConfig, FeedbackError, QueryId, QueryResult as EngineQueryResult, RgdbEngine};
+pub use rag::{RAGQueryEngine, QueryConfig, QueryResult as RagQueryResult, EmbeddingStore, IntentClassifier, QueryIntent, UserContext};
 pub use transitions::{TransitionConfig, TransitionError, TransitionStore};
