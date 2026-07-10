@@ -56,6 +56,12 @@ impl RelationVocab {
         if ai >= n || bi >= n { return 0.0; }
         self.similarity[ai * n + bi]
     }
+
+    /// Relation names, index == RelationId.
+    pub fn names(&self) -> &[String] { &self.names }
+
+    /// Flat row-major n*n similarity matrix.
+    pub fn matrix(&self) -> &[f32] { &self.similarity }
 }
 
 #[cfg(test)]

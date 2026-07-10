@@ -49,6 +49,10 @@ ndarray = "0.16"
 # Parallelism
 rayon = "1.10"
 
+# Engine: live vocab swap + bounded query cache
+arc-swap = "1.7"
+lru = "0.12"
+
 # LLM support (optional)
 llm-chain = { version = "0.4", optional = true }
 
