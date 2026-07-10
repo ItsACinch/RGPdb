@@ -21,3 +21,6 @@ jobs:
       - run: pip install pandas
       - run: maturin develop -m rgdb-python/Cargo.toml
       - run: python rgdb-eval/scripts/smoke_bindings.py
+      - run: pip install numpy scipy pandas pytest
+      - run: pip install -e rgdb-eval --no-deps
+      - run: python -m pytest rgdb-eval/tests -v

@@ -1,3 +1,9 @@
+compile_error!(
+    "The llm-chain integration targets the pre-rewrite angle-bin propagation API \
+     and has not been ported to the sparse typed-PPR model. It is intentionally \
+     disabled. Track the port in a separate effort; do not build with --features llm."
+);
+
 /// LLM integration using llm-chain for query understanding
 
 use crate::graph::{Graph, NodeId, AngleBin};
