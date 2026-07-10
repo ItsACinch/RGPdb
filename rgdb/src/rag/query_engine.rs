@@ -79,7 +79,7 @@ impl RAGQueryEngine {
         };
 
         // 3. Diffuse.
-        let params = PropagationParams { max_depth: config.max_hops, min_intensity: config.min_relevance };
+        let params = PropagationParams { max_depth: config.max_hops, min_intensity: config.min_relevance, depth_weights: None };
         let totals = propagate(&self.graph, &self.vocab, &seeds, query_relation, &params);
 
         // 4. Vector similarities for all nodes (dense; ANN is future work).

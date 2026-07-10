@@ -252,7 +252,7 @@ mod tests {
 
     fn exact() -> PropagationParams {
         // The forward/backward invariant is exact only without pruning.
-        PropagationParams { max_depth: 4, min_intensity: 0.0 }
+        PropagationParams { max_depth: 4, min_intensity: 0.0, depth_weights: None }
     }
 
     fn chain() -> Graph {
@@ -362,7 +362,7 @@ mod tests {
         let e = |dst| (dst, EdgeProps { attenuation: 0.0, relation: 0, is_portal: false });
         let g = Graph::from_adjacency(2, vec![vec![e(1)], vec![e(1)]], NodeProps::default()).unwrap();
         let v = RelationVocab::uniform(1);
-        let p = PropagationParams { max_depth: 2, min_intensity: 0.0 };
+        let p = PropagationParams { max_depth: 2, min_intensity: 0.0, depth_weights: None };
         let fwd = *propagate(&g, &v, &[(0, 1.0)], Some(0), &p).get(&1).unwrap();
         let bwd = backward_mass_at_target(&g, &v, &[(0, 1.0)], Some(0), 1, &p);
         assert!((fwd - 1.5725).abs() < 1e-5, "forward drifted: {fwd}");
@@ -377,7 +377,7 @@ mod tests {
         let eb = (2u32, EdgeProps { attenuation: 0.0, relation: 1, is_portal: false });
         let g = Graph::from_adjacency(3, vec![vec![ea], vec![eb], vec![]], NodeProps::default()).unwrap();
         let v = RelationVocab::uniform(2);
-        let p = PropagationParams { max_depth: 2, min_intensity: 0.0 };
+        let p = PropagationParams { max_depth: 2, min_intensity: 0.0, depth_weights: None };
         let c = credit(&g, &v, &[(0, 1.0)], None, 2, &p);
         assert_eq!(c.len(), 1, "only the typed second hop is credited");
         assert_eq!((c[0].0, c[0].1), (0, 1));
@@ -391,7 +391,7 @@ mod tests {
         let e2 = (2u32, EdgeProps { attenuation: 0.5, relation: 0, is_portal: false });
         let g = Graph::from_adjacency(3, vec![vec![e1, e2], vec![], vec![]], NodeProps::default()).unwrap();
         let v = RelationVocab::uniform(1);
-        let p = PropagationParams { max_depth: 1, min_intensity: 0.0 };
+        let p = PropagationParams { max_depth: 1, min_intensity: 0.0, depth_weights: None };
         let fwd = *propagate(&g, &v, &[(0, 1.0)], Some(0), &p).get(&1).unwrap();
         let bwd = backward_mass_at_target(&g, &v, &[(0, 1.0)], Some(0), 1, &p);
         let expected = 0.85f32 * (1.0 / 1.5); // reflection * p(0->1)

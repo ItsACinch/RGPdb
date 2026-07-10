@@ -78,7 +78,7 @@ fn propagate(
     max_depth: usize,
     min_intensity: f32,
 ) -> Vec<(u32, f32)> {
-    let params = PropagationParams { max_depth, min_intensity };
+    let params = PropagationParams { max_depth, min_intensity, depth_weights: None };
     let totals = rust_propagate(&graph.inner, &vocab.inner, &seeds, query_relation, &params);
     totals.into_iter().collect()
 }
@@ -104,7 +104,7 @@ impl PyEngine {
 
     #[pyo3(signature = (seeds, query_relation=None, max_depth=4, min_intensity=1e-3))]
     fn query(&self, seeds: Vec<(u32, f32)>, query_relation: Option<u16>, max_depth: usize, min_intensity: f32) -> (Vec<(u32, f32)>, u64) {
-        let params = PropagationParams { max_depth, min_intensity };
+        let params = PropagationParams { max_depth, min_intensity, depth_weights: None };
         let r = self.inner.query(&seeds, query_relation, &params);
         (r.ranked, r.query_id)
     }

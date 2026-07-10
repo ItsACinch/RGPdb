@@ -142,7 +142,7 @@ impl RgdbEngine {
             QueryContext {
                 seeds: seeds.to_vec(),
                 query_relation,
-                params: *params,
+                params: params.clone(),
                 vocab,
                 created: Instant::now(),
             },
@@ -241,7 +241,7 @@ mod tests {
         RgdbEngine::new(g, prior, cfg)
     }
 
-    fn params() -> PropagationParams { PropagationParams { max_depth: 4, min_intensity: 0.0 } }
+    fn params() -> PropagationParams { PropagationParams { max_depth: 4, min_intensity: 0.0, depth_weights: None } }
 
     #[test]
     fn cold_start_matrix_is_uniform() {
@@ -311,7 +311,7 @@ mod tests {
         assert_eq!(e.vocab().similarity(0, 1), 1.0);
         assert_eq!(e.vocab().similarity(0, 2), 1.0);
 
-        let p = PropagationParams { max_depth: 2, min_intensity: 0.0 };
+        let p = PropagationParams { max_depth: 2, min_intensity: 0.0, depth_weights: None };
         let r = e.query(&[(0, 1.0)], Some(0), &p);
         e.record_feedback(r.query_id, 2, 100.0).unwrap();
 
@@ -413,7 +413,7 @@ mod tests {
             prior,
             TransitionConfig { rebuild_every_n: 0, ..TransitionConfig::default() },
         );
-        let p = PropagationParams { max_depth: 2, min_intensity: 0.0 };
+        let p = PropagationParams { max_depth: 2, min_intensity: 0.0, depth_weights: None };
 
         // 1) Issue the query first: it captures the uniform vocab.
         let q1 = e.query(&[(0, 1.0)], Some(0), &p);

@@ -2,21 +2,25 @@
 
 use crate::graph::{Graph, NodeId, RelationId};
 use crate::relation::RelationVocab;
+use crate::depth_weights::DepthWeights;
 use hashbrown::HashMap;
 use rayon::prelude::*;
 
 /// Propagation parameters.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct PropagationParams {
     /// Maximum number of hops.
     pub max_depth: usize,
     /// Minimum mass to keep propagating (also prunes tiny contributions).
     pub min_intensity: f32,
+    /// Per-hop scoring coefficients (index = arrival depth, 0 = seed). `None` =
+    /// uniform (all-ones). When `Some`, length MUST equal `max_depth + 1`.
+    pub depth_weights: Option<DepthWeights>,
 }
 
 impl Default for PropagationParams {
     fn default() -> Self {
-        Self { max_depth: 4, min_intensity: 1e-3 }
+        Self { max_depth: 4, min_intensity: 1e-3, depth_weights: None }
     }
 }
 
@@ -59,7 +63,14 @@ pub fn propagate_single(
         return totals;
     }
 
-    *totals.entry(seed).or_insert(0.0) += initial_mass;
+    let dw = params.depth_weights.as_ref().map(|w| w.as_slice());
+    debug_assert!(
+        dw.map_or(true, |c| c.len() == params.max_depth + 1),
+        "depth_weights length must equal max_depth + 1"
+    );
+    let weight_at = |depth: usize| -> f32 { dw.map_or(1.0, |c| c[depth]) };
+
+    *totals.entry(seed).or_insert(0.0) += weight_at(0) * initial_mass;
 
     let mut frontier: HashMap<FrontierKey, f32> = HashMap::new();
     frontier.insert((seed, query_relation), initial_mass);
@@ -68,7 +79,7 @@ pub fn propagate_single(
     // reached ball rather than the whole graph).
     let mut denom_cache: HashMap<NodeId, f32> = HashMap::new();
 
-    for _depth in 0..params.max_depth {
+    for depth in 0..params.max_depth {
         if frontier.is_empty() {
             break;
         }
@@ -112,7 +123,9 @@ pub fn propagate_single(
                 if transmitted < params.min_intensity {
                     continue;
                 }
-                *totals.entry(v).or_insert(0.0) += transmitted;
+                // READOUT is weighted by arrival depth; FLOW stays raw so mass keeps
+                // propagating through depths that score zero.
+                *totals.entry(v).or_insert(0.0) += weight_at(depth + 1) * transmitted;
                 *next.entry((v, Some(ep.relation))).or_insert(0.0) += transmitted;
             }
         }
@@ -150,7 +163,7 @@ mod tests {
     fn chain_decays_by_reflection() {
         let g = chain();
         let vocab = RelationVocab::uniform(1);
-        let params = PropagationParams { max_depth: 4, min_intensity: 1e-6 };
+        let params = PropagationParams { max_depth: 4, min_intensity: 1e-6, depth_weights: None };
         let t = propagate_single(&g, &vocab, 0, 1.0, Some(0), &params);
         // reflection 0.85, p=1, sim=1 => geometric decay.
         assert!((t[&0] - 1.0).abs() < 1e-6);
@@ -171,7 +184,7 @@ mod tests {
             vec!["A".into(), "B".into()],
             vec![1.0, 0.5, 0.5, 1.0],
         ).unwrap();
-        let params = PropagationParams { max_depth: 4, min_intensity: 1e-6 };
+        let params = PropagationParams { max_depth: 4, min_intensity: 1e-6, depth_weights: None };
         let refr = propagate_single(&g, &vocab, 0, 1.0, Some(0), &params);
         // 1: 1*0.85*1*sim(A,A)=0.85 ; 2: 0.85*0.85*1*sim(A,B)=0.36125
         assert!((refr[&1] - 0.85).abs() < 1e-5);
@@ -191,7 +204,7 @@ mod tests {
         let adj = vec![vec![e(1), e(2)], vec![e(2)], vec![]];
         let g = Graph::from_adjacency(3, adj, NodeProps::default()).unwrap();
         let vocab = RelationVocab::uniform(1);
-        let params = PropagationParams { max_depth: 4, min_intensity: 1e-6 };
+        let params = PropagationParams { max_depth: 4, min_intensity: 1e-6, depth_weights: None };
         let t = propagate_single(&g, &vocab, 0, 1.0, Some(0), &params);
         // node 0 has 2 out-edges => p=0.5 each.
         // direct 0->2: 1*0.85*0.5 = 0.425
@@ -204,7 +217,7 @@ mod tests {
     fn multi_seed_equals_sum_of_singles() {
         let g = chain();
         let vocab = RelationVocab::uniform(1);
-        let params = PropagationParams { max_depth: 4, min_intensity: 1e-6 };
+        let params = PropagationParams { max_depth: 4, min_intensity: 1e-6, depth_weights: None };
         let combined = propagate(&g, &vocab, &[(0, 1.0), (1, 1.0)], Some(0), &params);
         let a = propagate_single(&g, &vocab, 0, 1.0, Some(0), &params);
         let b = propagate_single(&g, &vocab, 1, 1.0, Some(0), &params);
@@ -214,5 +227,71 @@ mod tests {
             let got = combined.get(&node).copied().unwrap_or(0.0);
             assert!((got - expected).abs() < 1e-5, "node {node}");
         }
+    }
+
+    #[test]
+    fn uniform_weights_are_bit_identical_to_none() {
+        let g = chain();
+        let vocab = RelationVocab::uniform(1);
+        let none = PropagationParams { max_depth: 3, min_intensity: 1e-6, depth_weights: None };
+        let uni = PropagationParams {
+            max_depth: 3,
+            min_intensity: 1e-6,
+            depth_weights: Some(crate::depth_weights::DepthWeights::uniform(3)),
+        };
+        let a = propagate_single(&g, &vocab, 0, 1.0, Some(0), &none);
+        let b = propagate_single(&g, &vocab, 0, 1.0, Some(0), &uni);
+        // EXACT equality, not approximate: 1.0 * x == x.
+        for node in 0..4u32 {
+            assert_eq!(a.get(&node), b.get(&node), "node {node}");
+        }
+    }
+
+    #[test]
+    fn terminal_weights_score_only_the_arrival_depth() {
+        let g = chain(); // 0->1->2->3
+        let vocab = RelationVocab::uniform(1);
+        let p = PropagationParams {
+            max_depth: 3,
+            min_intensity: 1e-6,
+            depth_weights: Some(crate::depth_weights::DepthWeights::terminal(3, 1).unwrap()),
+        };
+        let t = propagate_single(&g, &vocab, 0, 1.0, Some(0), &p);
+        // Only node 1 (arrives at depth 1) is scored; node 3 arrives at depth 3.
+        assert!((t[&1] - 0.85).abs() < 1e-6, "node 1 = {}", t[&1]);
+        assert_eq!(t.get(&3).copied().unwrap_or(0.0), 0.0, "node 3 scored 0 under terminal(1)");
+    }
+
+    #[test]
+    fn flow_is_not_weighted_so_terminal_still_reaches_depth() {
+        let g = chain(); // 0->1->2->3
+        let vocab = RelationVocab::uniform(1);
+        let p = PropagationParams {
+            max_depth: 3,
+            min_intensity: 1e-6,
+            depth_weights: Some(crate::depth_weights::DepthWeights::terminal(3, 3).unwrap()),
+        };
+        let t = propagate_single(&g, &vocab, 0, 1.0, Some(0), &p);
+        // Node 3 is only reachable by flowing through depth-1 and depth-2 nodes that
+        // score ZERO. If flow were weighted, node 3 would be unreachable.
+        assert!((t[&3] - 0.614125).abs() < 1e-5, "node 3 = {}", t[&3]);
+        assert_eq!(t.get(&1).copied().unwrap_or(0.0), 0.0);
+    }
+
+    #[test]
+    fn pruning_tests_raw_flow_not_weighted_score() {
+        let g = chain(); // 0->1->2->3
+        let vocab = RelationVocab::uniform(1);
+        // c_3 = 0.001 makes the weighted score of node 3 tiny (0.000614), but its raw
+        // flow (0.614) is well above min_intensity, so it must NOT be pruned.
+        let p = PropagationParams {
+            max_depth: 3,
+            min_intensity: 0.1,
+            depth_weights: Some(
+                crate::depth_weights::DepthWeights::from_vec(vec![1.0, 1.0, 1.0, 0.001], 3).unwrap(),
+            ),
+        };
+        let t = propagate_single(&g, &vocab, 0, 1.0, Some(0), &p);
+        assert!((t[&3] - 0.001 * 0.614125).abs() < 1e-7, "node 3 = {}", t[&3]);
     }
 }
