@@ -1,8 +1,14 @@
+compile_error!(
+    "The CUDA backend targets the pre-rewrite dense angle-bin kernel and has not \
+     been ported to the sparse typed-PPR model. It is intentionally disabled. \
+     Track the GPU port in a separate effort; do not build with --features cuda."
+);
+
 /// CUDA GPU acceleration for RGDB
-/// 
+///
 /// This module provides GPU-accelerated propagation kernels.
 /// Requires CUDA toolkit and NVIDIA GPU.
-/// 
+///
 /// MIGRATION NOTE: We're migrating from rustacuda to cudarc due to
 /// context stack management issues in rustacuda. The cudarc implementation
 /// provides better resource management and avoids cleanup crashes.
