@@ -144,9 +144,23 @@ seed→target path within `max_depth` — i.e. exactly the forward mass at the t
 Asserting this ties the backward walk to the already-tested forward kernel and
 catches essentially any bookkeeping error in either direction.
 
-The backward walk needs **in-edges**, so `Graph` gains a lazily-built, cached reverse
-CSR (`O(E)` once). This is the only structural change to an existing type. The credit
-pass runs **only on feedback** — normal queries pay nothing.
+**This invariant holds exactly only when `min_intensity == 0.0`.** The forward pass
+prunes contributions below the threshold; the backward DP does not. Property tests
+therefore assert it with `min_intensity: 0.0`. In production, pruning makes the
+credit an efficient approximation — which is exactly what we want.
+
+**No reverse CSR is required, and `Graph` is not modified.** The recursion
+
+```
+B_j[(v,r)] = [v == target] + Σ_{v→x} w(v→x | r) · B_{j−1}[(x, rel(v→x))]
+```
+
+expresses `B_j` at `v` in terms of `B_{j−1}` at `v`'s **out-neighbors**. It is
+backward in *depth budget*, not backward in *graph direction* — a dynamic program
+over the forward-reachable ball using ordinary out-adjacency. Since flow needs `F`
+at the edge's source and `B` at its destination, and both live in that ball, every
+lookup is satisfied by iterating out-edges. The credit pass runs **only on
+feedback** — normal queries pay nothing.
 
 ### `engine.rs` — `RgdbEngine`
 The database surface. Composes `Graph`, the live vocab, the store, and a bounded
@@ -263,7 +277,6 @@ an error saying why it didn't.
   cross-check property**: `Σ_seeds seed_mass · B_maxdepth[(seed, query_relation)]`
   equals `propagate(...)[target]`, asserted on several shapes. That invariant ties
   the new backward walk to the already-tested forward kernel.
-- **Unit — reverse CSR:** in-edges match a brute-force scan of out-edges.
 - **Integration — `RgdbEngine`:** on the synthetic planted-path probes,
   `query → record_feedback → refresh` shifts ranking in the predicted direction; a
   `refresh()` with no feedback is a no-op; `record_feedback` on an evicted id errors.
