@@ -129,6 +129,78 @@ impl TransitionStore {
         self.events_since_rebuild = 0;
         vocab
     }
+
+    /// Atomic write: serialize to `<path>.tmp`, then rename over `path`.
+    pub fn save(&self, path: &str) -> Result<(), TransitionError> {
+        use byteorder::{LittleEndian, WriteBytesExt};
+        use std::io::Write;
+
+        let tmp = format!("{path}.tmp");
+        {
+            let mut f = std::fs::File::create(&tmp)?;
+            f.write_all(b"RGTR")?;
+            f.write_u32::<LittleEndian>(1)?; // version
+            f.write_u32::<LittleEndian>(self.names.len() as u32)?;
+            for name in &self.names {
+                let b = name.as_bytes();
+                f.write_u32::<LittleEndian>(b.len() as u32)?;
+                f.write_all(b)?;
+            }
+            for &c in &self.counts {
+                f.write_f32::<LittleEndian>(c)?;
+            }
+            for &p in &self.prior {
+                f.write_f32::<LittleEndian>(p)?;
+            }
+            f.write_f32::<LittleEndian>(self.cfg.prior_strength)?;
+            f.write_f32::<LittleEndian>(self.cfg.floor)?;
+            f.write_f32::<LittleEndian>(self.cfg.decay)?;
+            f.write_u32::<LittleEndian>(self.cfg.rebuild_every_n)?;
+            f.flush()?;
+        }
+        std::fs::rename(&tmp, path)?;
+        Ok(())
+    }
+
+    pub fn load(path: &str) -> Result<Self, TransitionError> {
+        use byteorder::{LittleEndian, ReadBytesExt};
+        use std::io::Read;
+
+        let mut f = std::fs::File::open(path)?;
+        let mut magic = [0u8; 4];
+        f.read_exact(&mut magic)?;
+        if &magic != b"RGTR" {
+            return Err(TransitionError::Corrupt("bad magic".into()));
+        }
+        let version = f.read_u32::<LittleEndian>()?;
+        if version != 1 {
+            return Err(TransitionError::Corrupt(format!("unsupported version {version}")));
+        }
+        let n = f.read_u32::<LittleEndian>()? as usize;
+
+        let mut names = Vec::with_capacity(n);
+        for _ in 0..n {
+            let len = f.read_u32::<LittleEndian>()? as usize;
+            let mut buf = vec![0u8; len];
+            f.read_exact(&mut buf)?;
+            names.push(String::from_utf8_lossy(&buf).into_owned());
+        }
+        let mut counts = vec![0.0f32; n * n];
+        for c in counts.iter_mut() {
+            *c = f.read_f32::<LittleEndian>()?;
+        }
+        let mut prior = vec![0.0f32; n * n];
+        for p in prior.iter_mut() {
+            *p = f.read_f32::<LittleEndian>()?;
+        }
+        let cfg = TransitionConfig {
+            prior_strength: f.read_f32::<LittleEndian>()?,
+            floor: f.read_f32::<LittleEndian>()?,
+            decay: f.read_f32::<LittleEndian>()?,
+            rebuild_every_n: f.read_u32::<LittleEndian>()?,
+        };
+        Ok(Self { names, counts, prior, cfg, events_since_rebuild: 0 })
+    }
 }
 
 #[cfg(test)]
@@ -221,5 +293,44 @@ mod tests {
     fn bad_prior_shape_rejected() {
         let names = vec!["a".into(), "b".into()];
         assert!(TransitionStore::new(names, Some(vec![1.0; 3]), TransitionConfig::default()).is_err());
+    }
+
+    #[test]
+    fn save_load_roundtrip() {
+        let mut s = TransitionStore::new(
+            vec!["isa".into(), "causes".into()],
+            Some(vec![1.0, 0.3, 0.3, 1.0]),
+            TransitionConfig { prior_strength: 7.0, floor: 0.02, decay: 0.9, rebuild_every_n: 5 },
+        ).unwrap();
+        s.record(&[(0, 1, 1.0)], 3.0);
+
+        let path = "test_transitions_roundtrip.bin";
+        s.save(path).unwrap();
+        let t = TransitionStore::load(path).unwrap();
+
+        assert_eq!(t.names(), s.names());
+        assert_eq!(t.counts(), s.counts());
+        assert_eq!(t.prior(), s.prior());
+        assert_eq!(t.config().prior_strength, 7.0);
+        assert_eq!(t.config().floor, 0.02);
+        assert_eq!(t.config().decay, 0.9);
+        assert_eq!(t.config().rebuild_every_n, 5);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn load_rejects_bad_magic() {
+        let path = "test_transitions_badmagic.bin";
+        std::fs::write(path, b"NOPEnothing").unwrap();
+        assert!(TransitionStore::load(path).is_err());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn load_rejects_truncated_file() {
+        let path = "test_transitions_trunc.bin";
+        std::fs::write(path, b"RGTR\x01\x00\x00\x00").unwrap(); // magic + version, nothing else
+        assert!(TransitionStore::load(path).is_err());
+        let _ = std::fs::remove_file(path);
     }
 }
