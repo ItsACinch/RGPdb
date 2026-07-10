@@ -1,4 +1,16 @@
-from rgdb_eval.metaqa import parse_kb_line, parse_qa_line, load_kb_from_lines
+from rgdb_eval.metaqa import (
+    parse_kb_line, parse_qa_line, load_kb_from_lines, query_relation_from_qtype,
+)
+
+
+def test_query_relation_from_qtype():
+    # 1-hop: forward and inverse directions
+    assert query_relation_from_qtype("movie_to_director") == "directed_by"
+    assert query_relation_from_qtype("actor_to_movie") == "starred_actors_inv"
+    # multi-hop: first pair drives the first-hop relation
+    assert query_relation_from_qtype("movie_to_actor_to_movie_to_director") == "starred_actors"
+    # unresolvable
+    assert query_relation_from_qtype("nonsense") is None
 
 
 def test_parse_kb_line():

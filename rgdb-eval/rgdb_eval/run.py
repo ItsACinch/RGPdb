@@ -38,8 +38,10 @@ def main() -> None:
     all_questions = []
     for hop in (1, 2, 3):
         path = os.path.join(args.data, f"qa_test_{hop}hop.txt")
+        qtype = os.path.join(args.data, f"qa_test_{hop}hop_qtype.txt")
         if os.path.exists(path):
-            all_questions += load_questions(path, hop, graph, limit=args.limit)
+            all_questions += load_questions(path, hop, graph, limit=args.limit,
+                                            qtype_path=qtype)
 
     # One question embedding per question would be ideal; for a per-run table we
     # score each contender question-by-question, so embed lazily per question.

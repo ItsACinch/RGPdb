@@ -1,10 +1,45 @@
 """MetaQA knowledge-base and question loaders."""
 from __future__ import annotations
+import os
 import re
 
 from .dataset import TypedGraph, Question
 
 _TOPIC_RE = re.compile(r"\[(.+?)\]")
+
+# MetaQA entity-type pair -> base relation name. The inverse-augmented loader
+# also exposes "<rel>_inv" for the reverse direction, so a qtype segment can
+# resolve in either direction.
+_BASE_TYPE_RELATIONS = {
+    ("movie", "director"): "directed_by",
+    ("movie", "writer"): "written_by",
+    ("movie", "actor"): "starred_actors",
+    ("movie", "year"): "release_year",
+    ("movie", "language"): "in_language",
+    ("movie", "tags"): "has_tags",
+    ("movie", "genre"): "has_genre",
+}
+
+
+def query_relation_from_qtype(qtype: str) -> str | None:
+    """First-hop relation implied by a MetaQA qtype.
+
+    qtypes look like ``actor_to_movie`` (1-hop) or
+    ``movie_to_actor_to_movie_to_director`` (multi-hop). We take the first
+    ``<from>_to_<to>`` pair and map it to a relation (using the inverse when the
+    pair is reversed). Returns None if it can't be resolved.
+    """
+    parts = qtype.strip().split("_to_")
+    if len(parts) < 2:
+        return None
+    # normalize singular/plural token variants (e.g. "tag" vs "tags")
+    norm = {"tag": "tags"}
+    a, b = norm.get(parts[0], parts[0]), norm.get(parts[1], parts[1])
+    if (a, b) in _BASE_TYPE_RELATIONS:
+        return _BASE_TYPE_RELATIONS[(a, b)]
+    if (b, a) in _BASE_TYPE_RELATIONS:
+        return _BASE_TYPE_RELATIONS[(b, a)] + "_inv"
+    return None
 
 
 def parse_kb_line(line: str) -> tuple[str, str, str]:
@@ -66,10 +101,19 @@ def load_kb(kb_path: str, add_inverse: bool = True) -> TypedGraph:
 
 
 def load_questions(qa_path: str, hop: int, graph: TypedGraph,
-                   limit: int | None = None) -> list[Question]:
+                   limit: int | None = None,
+                   qtype_path: str | None = None) -> list[Question]:
+    # Optional per-question types (line-aligned with qa_path). When present,
+    # they give each question a query relation (the first-hop relation), so
+    # relation-aware contenders get a real signal instead of None.
+    qtypes: list[str] = []
+    if qtype_path and os.path.exists(qtype_path):
+        with open(qtype_path, encoding="utf-8") as f:
+            qtypes = [ln.strip() for ln in f]
+
     out: list[Question] = []
     with open(qa_path, encoding="utf-8") as f:
-        for line in f:
+        for i, line in enumerate(f):
             if not line.strip():
                 continue
             topic, answers = parse_qa_line(line)
@@ -79,9 +123,15 @@ def load_questions(qa_path: str, hop: int, graph: TypedGraph,
                           if a in graph.name_to_id]
             if not answer_ids:
                 continue
+            relation = None
+            if i < len(qtypes):
+                rel = query_relation_from_qtype(qtypes[i])
+                # only keep it if that relation actually exists in the graph
+                if rel is not None and rel in graph.relation_to_id:
+                    relation = rel
             out.append(Question(text=line.split("\t")[0],
                                 topic_id=graph.name_to_id[topic],
-                                answer_ids=answer_ids, relation=None, hop=hop))
+                                answer_ids=answer_ids, relation=relation, hop=hop))
             if limit is not None and len(out) >= limit:
                 break
     return out
