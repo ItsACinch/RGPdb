@@ -131,34 +131,41 @@ impl TransitionStore {
     }
 
     /// Atomic write: serialize to `<path>.tmp`, then rename over `path`.
+    /// A failed write removes the partial temp file and leaves `path` untouched.
     pub fn save(&self, path: &str) -> Result<(), TransitionError> {
+        let tmp = format!("{path}.tmp");
+        if let Err(e) = self.write_snapshot(&tmp) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e);
+        }
+        std::fs::rename(&tmp, path)?;
+        Ok(())
+    }
+
+    fn write_snapshot(&self, tmp: &str) -> Result<(), TransitionError> {
         use byteorder::{LittleEndian, WriteBytesExt};
         use std::io::Write;
 
-        let tmp = format!("{path}.tmp");
-        {
-            let mut f = std::fs::File::create(&tmp)?;
-            f.write_all(b"RGTR")?;
-            f.write_u32::<LittleEndian>(1)?; // version
-            f.write_u32::<LittleEndian>(self.names.len() as u32)?;
-            for name in &self.names {
-                let b = name.as_bytes();
-                f.write_u32::<LittleEndian>(b.len() as u32)?;
-                f.write_all(b)?;
-            }
-            for &c in &self.counts {
-                f.write_f32::<LittleEndian>(c)?;
-            }
-            for &p in &self.prior {
-                f.write_f32::<LittleEndian>(p)?;
-            }
-            f.write_f32::<LittleEndian>(self.cfg.prior_strength)?;
-            f.write_f32::<LittleEndian>(self.cfg.floor)?;
-            f.write_f32::<LittleEndian>(self.cfg.decay)?;
-            f.write_u32::<LittleEndian>(self.cfg.rebuild_every_n)?;
-            f.flush()?;
+        let mut f = std::fs::File::create(tmp)?;
+        f.write_all(b"RGTR")?;
+        f.write_u32::<LittleEndian>(1)?; // version
+        f.write_u32::<LittleEndian>(self.names.len() as u32)?;
+        for name in &self.names {
+            let b = name.as_bytes();
+            f.write_u32::<LittleEndian>(b.len() as u32)?;
+            f.write_all(b)?;
         }
-        std::fs::rename(&tmp, path)?;
+        for &c in &self.counts {
+            f.write_f32::<LittleEndian>(c)?;
+        }
+        for &p in &self.prior {
+            f.write_f32::<LittleEndian>(p)?;
+        }
+        f.write_f32::<LittleEndian>(self.cfg.prior_strength)?;
+        f.write_f32::<LittleEndian>(self.cfg.floor)?;
+        f.write_f32::<LittleEndian>(self.cfg.decay)?;
+        f.write_u32::<LittleEndian>(self.cfg.rebuild_every_n)?;
+        f.flush()?;
         Ok(())
     }
 
@@ -166,7 +173,12 @@ impl TransitionStore {
         use byteorder::{LittleEndian, ReadBytesExt};
         use std::io::Read;
 
+        // RelationId is u16, so a vocabulary can never exceed this many relations.
+        const MAX_RELATIONS: usize = 1 << 16;
+
+        let file_len = std::fs::metadata(path)?.len();
         let mut f = std::fs::File::open(path)?;
+
         let mut magic = [0u8; 4];
         f.read_exact(&mut magic)?;
         if &magic != b"RGTR" {
@@ -178,13 +190,39 @@ impl TransitionStore {
         }
         let n = f.read_u32::<LittleEndian>()? as usize;
 
+        // Validate `n` BEFORE allocating: a corrupt header must not drive a
+        // multi-gigabyte allocation (the allocator aborts the process on
+        // failure, so we would crash rather than return an error).
+        if n > MAX_RELATIONS {
+            return Err(TransitionError::Corrupt(format!(
+                "n={n} exceeds the {MAX_RELATIONS}-relation maximum"
+            )));
+        }
+        let matrix_bytes = (n as u64)
+            .saturating_mul(n as u64)
+            .saturating_mul(4)
+            .saturating_mul(2);
+        if matrix_bytes > file_len {
+            return Err(TransitionError::Corrupt(format!(
+                "n={n} implies {matrix_bytes} matrix bytes but the file is only {file_len}"
+            )));
+        }
+
         let mut names = Vec::with_capacity(n);
         for _ in 0..n {
-            let len = f.read_u32::<LittleEndian>()? as usize;
-            let mut buf = vec![0u8; len];
+            let len = u64::from(f.read_u32::<LittleEndian>()?);
+            if len > file_len {
+                return Err(TransitionError::Corrupt(format!(
+                    "name length {len} exceeds the file size {file_len}"
+                )));
+            }
+            let mut buf = vec![0u8; len as usize];
             f.read_exact(&mut buf)?;
-            names.push(String::from_utf8_lossy(&buf).into_owned());
+            names.push(String::from_utf8(buf).map_err(|_| {
+                TransitionError::Corrupt("invalid utf-8 in relation name".into())
+            })?);
         }
+
         let mut counts = vec![0.0f32; n * n];
         for c in counts.iter_mut() {
             *c = f.read_f32::<LittleEndian>()?;
@@ -331,6 +369,53 @@ mod tests {
         let path = "test_transitions_trunc.bin";
         std::fs::write(path, b"RGTR\x01\x00\x00\x00").unwrap(); // magic + version, nothing else
         assert!(TransitionStore::load(path).is_err());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn load_rejects_absurd_relation_count() {
+        // magic + version + n = 0xFFFFFFFF, and nothing else.
+        let path = "test_transitions_hugen.bin";
+        let mut b = Vec::new();
+        b.extend_from_slice(b"RGTR");
+        b.extend_from_slice(&1u32.to_le_bytes());
+        b.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+        std::fs::write(path, &b).unwrap();
+        assert!(
+            matches!(TransitionStore::load(path), Err(TransitionError::Corrupt(_))),
+            "must reject before allocating"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn load_rejects_invalid_utf8_name() {
+        let path = "test_transitions_badutf8.bin";
+        let mut b = Vec::new();
+        b.extend_from_slice(b"RGTR");
+        b.extend_from_slice(&1u32.to_le_bytes());
+        b.extend_from_slice(&1u32.to_le_bytes()); // n = 1
+        b.extend_from_slice(&2u32.to_le_bytes()); // name length = 2
+        b.extend_from_slice(&[0xff, 0xfe]); // not valid utf-8
+        b.extend_from_slice(&0.0f32.to_le_bytes()); // counts (1x1)
+        b.extend_from_slice(&1.0f32.to_le_bytes()); // prior  (1x1)
+        b.extend_from_slice(&10.0f32.to_le_bytes());
+        b.extend_from_slice(&0.05f32.to_le_bytes());
+        b.extend_from_slice(&1.0f32.to_le_bytes());
+        b.extend_from_slice(&64u32.to_le_bytes());
+        std::fs::write(path, &b).unwrap();
+        assert!(matches!(TransitionStore::load(path), Err(TransitionError::Corrupt(_))));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn empty_store_roundtrips() {
+        let s = TransitionStore::new(Vec::new(), None, TransitionConfig::default()).unwrap();
+        let path = "test_transitions_empty.bin";
+        s.save(path).unwrap();
+        let t = TransitionStore::load(path).unwrap();
+        assert_eq!(t.len(), 0);
+        assert!(t.counts().is_empty());
         let _ = std::fs::remove_file(path);
     }
 }
