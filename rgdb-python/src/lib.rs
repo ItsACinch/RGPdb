@@ -4,6 +4,8 @@ use pyo3::prelude::*;
 use rgdb::graph::{Graph, NodeProps, EdgeProps, NodeId, RelationId};
 use rgdb::relation::RelationVocab;
 use rgdb::propagation::{propagate as rust_propagate, PropagationParams};
+use rgdb::engine::{RgdbEngine, QueryId};
+use rgdb::transitions::TransitionConfig;
 
 #[pyclass(name = "RgdbGraph")]
 struct PyGraph { inner: Graph }
@@ -81,10 +83,54 @@ fn propagate(
     totals.into_iter().collect()
 }
 
+#[pyclass(name = "Engine")]
+struct PyEngine { inner: RgdbEngine }
+
+#[pymethods]
+impl PyEngine {
+    #[new]
+    #[pyo3(signature = (graph, vocab, prior_strength=10.0, floor=0.05, decay=1.0, rebuild_every_n=64))]
+    fn new(graph: &PyGraph, vocab: &PyVocab, prior_strength: f32, floor: f32, decay: f32, rebuild_every_n: u32) -> Self {
+        let cfg = TransitionConfig { prior_strength, floor, decay, rebuild_every_n };
+        PyEngine { inner: RgdbEngine::new(graph.inner.clone(), vocab.inner.clone(), cfg) }
+    }
+
+    #[staticmethod]
+    fn load(graph: &PyGraph, path: &str) -> PyResult<Self> {
+        RgdbEngine::load(graph.inner.clone(), path)
+            .map(|inner| PyEngine { inner })
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("{e}")))
+    }
+
+    #[pyo3(signature = (seeds, query_relation=None, max_depth=4, min_intensity=1e-3))]
+    fn query(&self, seeds: Vec<(u32, f32)>, query_relation: Option<u16>, max_depth: usize, min_intensity: f32) -> (Vec<(u32, f32)>, u64) {
+        let params = PropagationParams { max_depth, min_intensity };
+        let r = self.inner.query(&seeds, query_relation, &params);
+        (r.ranked, r.query_id)
+    }
+
+    #[pyo3(signature = (query_id, target, signal=1.0))]
+    fn record_feedback(&self, query_id: u64, target: u32, signal: f32) -> PyResult<()> {
+        self.inner
+            .record_feedback(query_id as QueryId, target, signal)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("{e}")))
+    }
+
+    fn refresh(&self) { self.inner.refresh(); }
+    fn matrix(&self) -> Vec<f32> { self.inner.matrix() }
+    fn counts(&self) -> Vec<f32> { self.inner.counts_snapshot() }
+    fn events_since_rebuild(&self) -> u32 { self.inner.events_since_rebuild() }
+
+    fn save(&self, path: &str) -> PyResult<()> {
+        self.inner.save(path).map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("{e}")))
+    }
+}
+
 #[pymodule]
 fn _rgdb_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyGraph>()?;
     m.add_class::<PyVocab>()?;
+    m.add_class::<PyEngine>()?;
     m.add_function(wrap_pyfunction!(build_graph, m)?)?;
     m.add_function(wrap_pyfunction!(uniform_vocab, m)?)?;
     m.add_function(wrap_pyfunction!(vocab_from_matrix, m)?)?;
