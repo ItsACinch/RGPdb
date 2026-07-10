@@ -113,7 +113,9 @@ fn backward(
     for j in 1..=d {
         let mut cur: HashMap<State, f32> = HashMap::with_capacity(ball.len());
         for &(v, r) in ball {
-            let mut acc = if v == target { 1.0 } else { 0.0 };
+            // Exact remaining length: no target re-add. B[j] is mass over
+            // continuations of EXACTLY j more hops. (b[0] still seeds [v==target].)
+            let mut acc = 0.0f32;
             let denom = out_weight_sum(graph, v, denom_cache);
             if denom > 0.0 {
                 for (x, ep) in graph.neighbors(v) {
@@ -179,9 +181,30 @@ pub fn credit(
     let ball = ball_of(&f);
     let b = backward(graph, vocab, target, &ball, params, &mut denom_cache);
 
-    let mut flow: HashMap<(RelationId, RelationId), f32> = HashMap::new();
+    // c[L] weights a path of total length L. A hop at forward position k+1 with j
+    // hops remaining sits on a length-(k+1+j) path. Precompute per forward level k:
+    //   G_k[(v,r)] = Σ_{j=0}^{d-k-1} c[k+1+j] · B[j][(v,r)]
+    // so the flow loop stays O(edges) rather than O(edges · d).
+    let c = params.depth_weights.as_ref().map(|w| w.as_slice());
+    let weight_at = |depth: usize| -> f32 { c.map_or(1.0, |cc| cc[depth]) };
+    let mut gk: Vec<HashMap<State, f32>> = vec![HashMap::new(); d];
     for k in 0..d {
         let budget = d - k - 1;
+        let mut acc: HashMap<State, f32> = HashMap::new();
+        for j in 0..=budget {
+            let wj = weight_at(k + 1 + j);
+            if wj == 0.0 {
+                continue;
+            }
+            for (&st, &val) in &b[j] {
+                *acc.entry(st).or_insert(0.0) += wj * val;
+            }
+        }
+        gk[k] = acc;
+    }
+
+    let mut flow: HashMap<(RelationId, RelationId), f32> = HashMap::new();
+    for k in 0..d {
         let states: Vec<(State, f32)> = f[k].iter().map(|(&s, &m)| (s, m)).collect();
         for ((u, r_in), mass) in states {
             if mass <= 0.0 {
@@ -202,7 +225,7 @@ pub fn credit(
                 if w <= 0.0 {
                     continue;
                 }
-                let bv = b[budget].get(&(v, Some(ep.relation))).copied().unwrap_or(0.0);
+                let bv = gk[k].get(&(v, Some(ep.relation))).copied().unwrap_or(0.0);
                 if bv <= 0.0 {
                     continue;
                 }
@@ -218,8 +241,9 @@ pub fn credit(
     flow.into_iter().map(|((a, bb), v)| (a, bb, v / total)).collect()
 }
 
-/// Diagnostic: `Σ_seeds seed_mass · B_maxdepth[(seed, query_relation)]`.
-/// Equals `propagate(...)[target]` exactly when `params.min_intensity == 0.0`.
+/// Diagnostic: `Σ_seeds seed_mass · Σ_L depth_weights[L] · B_exact[L][(seed, query_relation)]`.
+/// Equals `propagate(..., params)[target]` exactly when `params.min_intensity == 0.0`.
+/// At `depth_weights = None` (uniform) this reduces to the at-most-`max_depth` mass.
 pub fn backward_mass_at_target(
     graph: &Graph,
     vocab: &RelationVocab,
@@ -237,9 +261,16 @@ pub fn backward_mass_at_target(
     let ball = ball_of(&f);
     let b = backward(graph, vocab, target, &ball, params, &mut denom_cache);
 
+    let c = params.depth_weights.as_ref().map(|w| w.as_slice());
+    let weight_at = |depth: usize| -> f32 { c.map_or(1.0, |cc| cc[depth]) };
     seeds
         .iter()
-        .map(|&(s, m)| m * b[d].get(&(s, query_relation)).copied().unwrap_or(0.0))
+        .map(|&(s, m)| {
+            let per_seed: f32 = (0..=d)
+                .map(|l| weight_at(l) * b[l].get(&(s, query_relation)).copied().unwrap_or(0.0))
+                .sum();
+            m * per_seed
+        })
         .sum()
 }
 
@@ -408,5 +439,68 @@ mod tests {
         let fwd = *propagate(&g, &v, &seeds, Some(0), &p).get(&3).unwrap();
         let bwd = backward_mass_at_target(&g, &v, &seeds, Some(0), 3, &p);
         assert!((bwd - fwd).abs() < 1e-5, "bwd {bwd} != fwd {fwd}");
+    }
+
+    /// 0 -A-> 3 (length 1) and 0 -A-> 1 -B-> 3 (length 2). Target 3 is reachable at
+    /// two DIFFERENT path lengths, so depth weights change both the forward readout
+    /// and the credit attribution — the discriminating fixture.
+    fn two_lengths() -> (Graph, RelationVocab) {
+        let a3 = (3u32, EdgeProps { attenuation: 0.0, relation: 0, is_portal: false });
+        let a1 = (1u32, EdgeProps { attenuation: 0.0, relation: 0, is_portal: false });
+        let b3 = (3u32, EdgeProps { attenuation: 0.0, relation: 1, is_portal: false });
+        let g = Graph::from_adjacency(
+            4,
+            vec![vec![a3, a1], vec![b3], vec![], vec![]],
+            NodeProps::default(),
+        )
+        .unwrap();
+        let v = RelationVocab::new(vec!["A".into(), "B".into()], vec![1.0, 0.5, 0.5, 1.0]).unwrap();
+        (g, v)
+    }
+
+    fn params_with(c: Option<crate::depth_weights::DepthWeights>) -> PropagationParams {
+        PropagationParams { max_depth: 2, min_intensity: 0.0, depth_weights: c }
+    }
+
+    #[test]
+    fn generalized_invariant_holds_under_depth_weights() {
+        use crate::depth_weights::DepthWeights;
+        let (g, v) = two_lengths();
+        // (depth weights, expected forward mass at target 3)
+        //   terminal(1): only the length-1 direct path  = 0.85 * 0.5 = 0.425
+        //   terminal(2): only the length-2 path 0-A->1-B->3 = 0.425 * 0.425 = 0.180625
+        //   [0,1,1]:     both                              = 0.605625
+        let cases = [
+            (DepthWeights::terminal(2, 1).unwrap(), 0.425_f32),
+            (DepthWeights::terminal(2, 2).unwrap(), 0.180625_f32),
+            (DepthWeights::from_vec(vec![0.0, 1.0, 1.0], 2).unwrap(), 0.605625_f32),
+        ];
+        for (c, expected_fwd) in cases {
+            let p = params_with(Some(c));
+            let fwd = *propagate(&g, &v, &[(0, 1.0)], Some(0), &p).get(&3).unwrap();
+            let bwd = backward_mass_at_target(&g, &v, &[(0, 1.0)], Some(0), 3, &p);
+            assert!((fwd - expected_fwd).abs() < 1e-5, "fwd {fwd} != expected {expected_fwd}");
+            assert!((bwd - fwd).abs() < 1e-5, "bwd {bwd} != fwd {fwd}");
+        }
+    }
+
+    #[test]
+    fn terminal_credit_selects_paths_by_length() {
+        use crate::depth_weights::DepthWeights;
+        let (g, v) = two_lengths();
+        // terminal(1): only the direct 0-A->3 hop earns credit -> (A, A) at 100%.
+        let c1 = credit(&g, &v, &[(0, 1.0)], Some(0), 3, &params_with(Some(DepthWeights::terminal(2, 1).unwrap())));
+        assert_eq!(c1.len(), 1);
+        assert_eq!((c1[0].0, c1[0].1), (0, 0));
+        assert!((c1[0].2 - 1.0).abs() < 1e-5);
+
+        // terminal(2): only the 0-A->1-B->3 path -> credit split across (A,A) and (A,B).
+        let mut c2 = credit(&g, &v, &[(0, 1.0)], Some(0), 3, &params_with(Some(DepthWeights::terminal(2, 2).unwrap())));
+        c2.sort_by_key(|&(a, b, _)| (a, b));
+        assert_eq!(c2.len(), 2);
+        assert_eq!((c2[0].0, c2[0].1), (0, 0));
+        assert_eq!((c2[1].0, c2[1].1), (0, 1));
+        assert!((c2[0].2 - 0.5).abs() < 1e-5, "(A,A) got {}", c2[0].2);
+        assert!((c2[1].2 - 0.5).abs() < 1e-5, "(A,B) got {}", c2[1].2);
     }
 }
