@@ -1,13 +1,136 @@
 # Deferred: Query-Conditioned Per-Hop Refraction ("Option C")
 
-> **STATUS: DEFERRED — an unvalidated hypothesis, not an approved design.**
-> Explicitly out of scope for the data-weighted-transitions + self-learning-loop
-> design (options A + B). Do not build this until the validation experiment below
-> has been run and passes. Captured here so the reasoning isn't lost.
+> **STATUS: STILL DEFERRED. The validation gate was run on 2026-07-10 and FAILED
+> as written. Do not build C.** The gate also turned out to be mis-specified in
+> the exact way open question #4 predicted, so the failure does not mean the idea
+> is dead — it means the experiment could not test it. A replacement gate is at
+> the bottom of the "Validation result" section. Read that section before doing
+> anything else with this document.
 
 **Date captured:** 2026-07-10
+**Date validated:** 2026-07-10 — see "Validation result" below.
 **Depends on:** the A+B design (self-learning loop) — see below, B is what makes C
 *trainable*.
+
+---
+
+## Validation result (2026-07-10)
+
+Scripts: `rgdb-eval/scripts/experiment_gold_schedule.py`,
+`rgdb-eval/scripts/experiment_distance_artifact.py`.
+Data: `rgdb-eval/results/metaqa-gold-schedule.md`,
+`rgdb-eval/results/metaqa-distance-artifact.md`.
+MetaQA, 1000 test questions per hop, gold chains from qtypes.
+
+**Validity check first.** Walking the gold relation chain from the topic entity
+reaches a gold answer for **100.0%** of questions at 1, 2, and 3 hops (recall
+1.000). The qtype→relation mapping is correct, so the numbers below mean something.
+
+### The gate: FAILED
+
+| 3-hop | untyped-ppr | gold schedule (floor 0.05) | gold schedule (floor 0.0) |
+|---|---:|---:|---:|
+| MRR | **0.279** | 0.258 | 0.254 |
+
+The gate said: *"if 3-hop MRR with a gold schedule does not clearly beat
+untyped-PPR's 0.279, abandon C."* It does not. **C as specified is not built.**
+
+### But the gate could not separate C from the kernel's accumulation rule
+
+The same run shows the gold schedule *finding* the answer far better than PPR
+while *ranking* it worse:
+
+| 3-hop | untyped-ppr | gold schedule (hard) |
+|---|---:|---:|
+| Hits@20 | 0.611 | **0.793** |
+| recall@20 | 0.262 | **0.578** |
+| MRR | **0.279** | 0.254 |
+
+`propagate()` accumulates intensity at **every visited node**, and every hop
+multiplies by `reflection · p(u→v) < 1`. So a hop-1 neighbour *on the correct
+chain* necessarily outranks the hop-3 answer *on that same chain*. A per-hop
+schedule cannot fix this, because the nodes drowning the answer are the ones the
+schedule itself is routing mass through. This is the "distance artifact" named in
+open question #4, written before the data existed.
+
+Controlling for it, with a mask that uses only `k` (shortest-path distance == 3,
+relations ignored — deployable in principle) and **no** chain knowledge:
+
+| 3-hop MRR | uniform | gold schedule |
+|---|---:|---:|
+| no mask | 0.264 | 0.260 |
+| + graph-distance==3 mask | 0.313 | **0.927** |
+
+Hits@1 under that mask: uniform 0.178 → gold schedule **0.926**, choosing
+correctly out of a mean of 8373 candidates.
+
+Read the two axes separately:
+
+- **Depth control alone buys almost nothing** (0.264 → 0.313). It narrows the
+  field but cannot discriminate within it.
+- **The relation schedule under depth control buys everything** (0.313 → 0.927).
+
+Neither works alone; they are complementary, not competing. The gate tested the
+schedule with the depth axis uncontrolled, and therefore measured their *sum*
+rather than the schedule's *contribution*.
+
+> A first version of this diagnostic masked candidates to the **gold chain's
+> terminal set** instead. That was wrong and nearly produced the opposite
+> conclusion: the mask leaves only ~14 candidates that the gold chain already
+> selected, so it hands the relation model to the "uniform" baseline for free
+> (uniform scores 0.792 under it). Any future mask must not encode the answer's
+> reasoning path.
+
+### What this does NOT show
+
+The 0.927 is an upper bound under **perfect chain prediction and perfect `k`**, and
+it is dangerously close to a tautology: the chain-terminal mask reaches 100% of
+gold answers with a mean of **14.3** candidates. If you truly know the chain and
+`k`, you can execute it as a graph traversal and read off the answers — no
+diffusion required. So this experiment establishes the ceiling of perfect schedule
+knowledge; it says nothing about the two things C actually lives or dies on:
+
+1. how accurately a schedule can be **predicted** (C2's RotatE + B's feedback), and
+2. whether diffusion **degrades gracefully** when the predicted schedule is soft or
+   wrong — the only regime where diffusion beats plain traversal.
+
+Both are untested. A soft/incorrect schedule could easily land below PPR.
+
+### Where the schedule already pays without any depth fix
+
+2-hop, unmasked, today's kernel:
+
+| 2-hop | untyped-ppr | gold schedule (hard) |
+|---|---:|---:|
+| MRR | 0.219 | **0.387** |
+| Hits@5 | 0.491 | **0.881** |
+| recall@20 | 0.798 | **0.948** |
+
+At 2 hops one intermediate layer is thin enough that the schedule's precision wins
+outright. (Hits@1 is ≈0 for *every* diffusion contender at 2 and 3 hops — the same
+artifact, visible everywhere.)
+
+### Verdict and replacement gate
+
+C stays deferred. It was not built. The original gate is retired: it conflated the
+relation model with the accumulation rule and could never have passed.
+
+If C is ever revisited, it must clear **all three** of these, in order:
+
+1. **Depth-aware scoring lands first, and separately.** Terminal-mass accumulation
+   or an exactly-`k` restriction, evaluated on its own. It is a smaller, cheaper
+   change than C, it is a prerequisite for C paying off at 3 hops, and it is worth
+   measuring whether it helps PPR too (it barely does — 0.264 → 0.313 — so its
+   value is almost entirely as C's enabler, which is an argument for doing them
+   together or not at all).
+2. **A *predicted* schedule, never a gold one, beats untyped-PPR unmasked.** Gold
+   schedules are settled: they work. The open question is prediction.
+3. **Graceful degradation is measured.** Sweep schedule accuracy from 100% down to
+   random and find where C crosses below PPR. If that crossover is at high
+   accuracy, C is too brittle to ship regardless of its ceiling.
+
+Until a predicted schedule exists (which needs B's feedback loop to generate
+training data), there is nothing to test. **B first, then step 1, then re-open C.**
 
 ---
 
@@ -127,12 +250,15 @@ Do the cheap upper-bound test first. It can kill the idea in an afternoon.
    bindings.
 3. Re-run 1/2/3-hop and compare against the numbers in the table above.
 
-**Pass/fail:**
-- If 3-hop MRR with a *gold* schedule does not clearly beat untyped-PPR's 0.279,
-  **abandon C.** Perfect knowledge of the chain would be the best case, and if the
-  best case doesn't win, predicting the chain imperfectly certainly won't.
-- If it does beat it, the question becomes "can we predict the schedule?" — and
-  only then is C2 (RotatE + the B feedback loop) worth designing.
+**Pass/fail (RETIRED — this gate was run and is superseded):**
+- ~~If 3-hop MRR with a *gold* schedule does not clearly beat untyped-PPR's 0.279,
+  **abandon C.**~~ Run on 2026-07-10: gold schedule scored 0.254–0.260 vs 0.279, so
+  this gate **failed**. C was not built.
+- The gate's premise — "perfect chain knowledge is the best case" — was false as
+  operationalized. It measured the schedule *and* the kernel's accumulate-at-every-node
+  rule together, and the latter structurally penalizes exactly the deep paths the
+  schedule routes mass along. See "Validation result" at the top of this document for
+  the corrected experiment and the three-part replacement gate.
 
 This mirrors how we tested 1-hop: hand the model the gold relation, establish the
 ceiling, and only then ask whether it can be inferred. The 1-hop result (0.999) is
@@ -166,9 +292,11 @@ is likely negligible relative to the win.
   of a dot-product per hop instead of a table lookup.
 - **Backwards compatibility.** Query-relative scoring changes results for every
   existing query. It is a behavioral break, not an additive feature.
-- **Does the k-hop ranking bias survive?** Diffusion inherently ranks nearer nodes
-  above the k-hop answer (Hits@1 ≈ 0 for every diffusion method at 2/3-hop). A
-  perfect schedule may still not fix Hits@1, because that is a *distance* artifact,
-  not a *relation* artifact. C may lift MRR without touching Hits@1 — worth
-  measuring separately, and possibly needing an orthogonal fix (terminal-node bias,
-  or restricting candidates to exactly-k-hop nodes).
+- **Does the k-hop ranking bias survive?** — **ANSWERED: yes, and it decided the
+  gate.** Diffusion ranks nearer nodes above the k-hop answer (Hits@1 ≈ 0 for every
+  diffusion method at 2/3-hop). A perfect schedule did *not* fix Hits@1 on its own;
+  it made 3-hop MRR slightly *worse* than PPR while nearly doubling recall@20. The
+  orthogonal fix guessed at here (terminal-node bias / exactly-k-hop restriction) is
+  a hard prerequisite, not an optional companion: with it, the gold schedule goes
+  from 0.260 to 0.927 MRR. This question, filed as speculation, turned out to be the
+  whole answer. See "Validation result".
