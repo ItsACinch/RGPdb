@@ -64,15 +64,33 @@ relations ignored — deployable in principle) and **no** chain knowledge:
 Hits@1 under that mask: uniform 0.178 → gold schedule **0.926**, choosing
 correctly out of a mean of 8373 candidates.
 
-Read the two axes separately:
+Crossing the depth axis against the relation model
+(`rgdb-eval/scripts/experiment_depth_control.py`,
+`rgdb-eval/results/metaqa-depth-control.md`) gives the full picture. 3-hop MRR:
 
-- **Depth control alone buys almost nothing** (0.264 → 0.313). It narrows the
-  field but cannot discriminate within it.
-- **The relation schedule under depth control buys everything** (0.313 → 0.927).
+| relation model | no depth control | + exactly-k mask |
+|---|---:|---:|
+| uniform (refraction off) | 0.264 | 0.313 |
+| **trained matrix** (option A, ships today) | **0.235** | **0.419** |
+| gold schedule (option C's ceiling) | 0.260 | 0.927 |
 
-Neither works alone; they are complementary, not competing. The gate tested the
-schedule with the depth axis uncontrolled, and therefore measured their *sum*
-rather than the schedule's *contribution*.
+`trained` is seeded with the first-hop relation only — intent-classifiable, no chain
+knowledge. The mask needs only `k`, no relation knowledge. So **`trained + mask` is
+deployable today**; `gold` is not.
+
+This is an **interaction**, not two independent effects:
+
+- **Depth control alone buys little** (0.264 → 0.313). It narrows the field but
+  cannot discriminate within it — the mask still leaves ~8373 candidates.
+- **Relation modelling alone is actively HARMFUL at 3 hops** (0.264 → 0.235).
+  Sharpening relation coherence concentrates mass along the correct chain, which
+  makes the hop-1/hop-2 intermediates on that chain *stronger* competitors to the
+  answer. Better relation modelling makes ranking worse until scoring is depth-aware.
+- **Together they compound** (0.313 → 0.419 with a global matrix; → 0.927 with a
+  perfect schedule).
+
+The original gate held the depth axis at "uncontrolled", the one setting where the
+relation axis has negative slope. It could not have passed, for any relation model.
 
 > A first version of this diagnostic masked candidates to the **gold chain's
 > terminal set** instead. That was wrong and nearly produced the opposite
@@ -112,25 +130,47 @@ artifact, visible everywhere.)
 
 ### Verdict and replacement gate
 
-C stays deferred. It was not built. The original gate is retired: it conflated the
-relation model with the accumulation rule and could never have passed.
+C stays deferred. It was not built. The original gate is retired: it held the depth
+axis at the one setting where the relation axis has negative slope, so no relation
+model — gold included — could have passed it.
 
-If C is ever revisited, it must clear **all three** of these, in order:
+**The next piece of work is not C. It is depth-aware scoring**, and it is worth doing
+on its own merits: it is what turns the already-shipped trained matrix from a 3-hop
+*regression* (0.235) into a 3-hop *win* (0.419 vs untyped-PPR's 0.279, +50%).
 
-1. **Depth-aware scoring lands first, and separately.** Terminal-mass accumulation
-   or an exactly-`k` restriction, evaluated on its own. It is a smaller, cheaper
-   change than C, it is a prerequisite for C paying off at 3 hops, and it is worth
-   measuring whether it helps PPR too (it barely does — 0.264 → 0.313 — so its
-   value is almost entirely as C's enabler, which is an argument for doing them
-   together or not at all).
-2. **A *predicted* schedule, never a gold one, beats untyped-PPR unmasked.** Gold
-   schedules are settled: they work. The open question is prediction.
+Suggested shape — additive, no behavioural break by default. Let `propagate()`
+accumulate intensity per depth and accept `depth_weights: &[f32]`:
+
+- `[1,1,1,1]` reproduces today's behaviour exactly (the default).
+- `[0,0,0,1]` is terminal-mass-only.
+- a soft prior peaked at `k` degrades gracefully when `k` is uncertain.
+
+Prefer this to the hard mask used in the experiment. The mask is brittle: only
+**87.1%** of gold answers sit at shortest-distance exactly 3 (the rest are reachable
+by shortcut edges), so it discards 13% of them outright and caps Hits@20 at ~0.93. A
+soft depth prior keeps them. It also removes the need to know `k` exactly.
+
+**If C is revisited afterwards, it must clear all three, in order:**
+
+1. **Depth-aware scoring has landed and is measured separately.** Without it, C's
+   own mechanism is self-defeating.
+2. **A *predicted* schedule beats the trained matrix under the SAME depth control** —
+   i.e. beat **0.419**, not untyped-PPR's 0.279. Gold schedules are settled: they
+   reach 0.927. The only open question is prediction, and the honest baseline is the
+   best deployable alternative, not the weakest one.
 3. **Graceful degradation is measured.** Sweep schedule accuracy from 100% down to
-   random and find where C crosses below PPR. If that crossover is at high
+   random and find where C crosses below 0.419. If the crossover sits at high
    accuracy, C is too brittle to ship regardless of its ceiling.
 
-Until a predicted schedule exists (which needs B's feedback loop to generate
-training data), there is nothing to test. **B first, then step 1, then re-open C.**
+The 0.419 → 0.927 gap is the prize, and it is large. But note what the ceiling
+implies: the chain-terminal mask reaches 100% of gold answers with a mean of **14.3**
+candidates, so at perfect chain knowledge you could execute the chain as a traversal
+and skip diffusion entirely. C only earns its keep in the middle of that range —
+where the schedule is good but imperfect, and diffusion's soft accumulation beats a
+brittle exact walk. Step 3 is therefore the real test of C, not step 2.
+
+Until a predicted schedule exists (which needs B's feedback loop to generate training
+data), there is nothing to test. **B (done) → depth-aware scoring → re-open C.**
 
 ---
 
