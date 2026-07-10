@@ -109,7 +109,7 @@ impl TransitionStore {
                 m[a * n + b] = if b == a {
                     1.0
                 } else if rowmax > 0.0 {
-                    (blended(a, b) / rowmax).clamp(0.0, 1.0).max(eps)
+                    (blended(a, b) / rowmax).clamp(0.0, 1.0).max(eps.clamp(0.0, 1.0))
                 } else {
                     1.0
                 };
@@ -406,6 +406,21 @@ mod tests {
         std::fs::write(path, &b).unwrap();
         assert!(matches!(TransitionStore::load(path), Err(TransitionError::Corrupt(_))));
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn out_of_range_floor_cannot_exceed_one() {
+        let names: Vec<String> = vec!["a".into(), "b".into(), "c".into()];
+        let cfg = TransitionConfig { floor: 2.0, ..TransitionConfig::default() };
+        let mut s = TransitionStore::new(names, None, cfg).unwrap();
+        s.record(&[(0, 1, 1.0)], 300.0);
+        let v = s.derive_vocab();
+        for a in 0..3u16 {
+            for b in 0..3u16 {
+                let x = v.similarity(a, b);
+                assert!((0.0..=1.0).contains(&x), "sim({a},{b}) = {x} outside [0,1]");
+            }
+        }
     }
 
     #[test]

@@ -152,6 +152,11 @@ impl RgdbEngine {
 
     /// Attribute `target` back to the relation transitions that carried mass to it.
     /// `signal` is signed: negative reports a wrong answer.
+    ///
+    /// Not idempotent: the query context is retained on success so a caller may
+    /// report several good answers for one ranking. Calling this twice with the same
+    /// `(query_id, target)` credits that target twice. Retrying callers must
+    /// de-duplicate.
     pub fn record_feedback(
         &self,
         query_id: QueryId,
@@ -187,14 +192,22 @@ impl RgdbEngine {
             return Err(FeedbackError::TargetUnreachable(target));
         }
 
-        let should_refresh = {
+        // Record and (if the threshold is crossed) rebuild inside ONE critical
+        // section. Splitting them lets two concurrent feedback events each observe
+        // `>= rebuild_every_n` and both call rebuild(), applying decay twice for a
+        // single threshold crossing.
+        let new_vocab = {
             let mut store = self.store.lock().unwrap();
             store.record(&credits, signal);
             let n = store.config().rebuild_every_n;
-            n > 0 && store.events_since_rebuild() >= n
+            if n > 0 && store.events_since_rebuild() >= n {
+                Some(store.rebuild())
+            } else {
+                None
+            }
         };
-        if should_refresh {
-            self.refresh();
+        if let Some(vocab) = new_vocab {
+            self.vocab.store(Arc::new(vocab));
         }
         Ok(())
     }
@@ -374,5 +387,54 @@ mod tests {
             e.record_feedback(r.query_id, 2, 1.0),
             Err(FeedbackError::UnknownQuery(_))
         ));
+    }
+
+    #[test]
+    fn credit_uses_the_vocab_captured_at_query_time() {
+        // Graph: 0 -(A)-> 1 -(B)-> 3, 0 -(A)-> 2 -(C)-> 3, and 1 -(B)-> 4.
+        // Under a UNIFORM matrix, crediting target 3 favours the C path 2:1 over the
+        // B path (node 1 splits its mass across two out-edges; node 2 does not).
+        // If credit ran under a LIVE matrix sharpened to punish A->C, that ratio
+        // inverts. So `delta(A,C) > delta(A,B)` proves the captured vocab was used.
+        let a1 = (1u32, EdgeProps { attenuation: 0.0, relation: 0, is_portal: false });
+        let a2 = (2u32, EdgeProps { attenuation: 0.0, relation: 0, is_portal: false });
+        let b3 = (3u32, EdgeProps { attenuation: 0.0, relation: 1, is_portal: false });
+        let b4 = (4u32, EdgeProps { attenuation: 0.0, relation: 1, is_portal: false });
+        let c3 = (3u32, EdgeProps { attenuation: 0.0, relation: 2, is_portal: false });
+        let g = Graph::from_adjacency(
+            5,
+            vec![vec![a1, a2], vec![b3, b4], vec![c3], vec![], vec![]],
+            NodeProps::default(),
+        )
+        .unwrap();
+        let prior = RelationVocab::with_names_uniform(vec!["A".into(), "B".into(), "C".into()]);
+        let e = RgdbEngine::new(
+            g,
+            prior,
+            TransitionConfig { rebuild_every_n: 0, ..TransitionConfig::default() },
+        );
+        let p = PropagationParams { max_depth: 2, min_intensity: 0.0 };
+
+        // 1) Issue the query first: it captures the uniform vocab.
+        let q1 = e.query(&[(0, 1.0)], Some(0), &p);
+
+        // 2) Sharpen the LIVE matrix to punish A->C, by crediting target 4 (reachable
+        //    only via A then B) and rebuilding.
+        let q2 = e.query(&[(0, 1.0)], Some(0), &p);
+        e.record_feedback(q2.query_id, 4, 1000.0).unwrap();
+        e.refresh();
+        assert!(e.vocab().similarity(0, 2) < 0.2, "live matrix should now punish A->C");
+
+        // 3) Feed back the OLD query. It must be credited under its captured vocab.
+        let before = e.counts_snapshot();
+        e.record_feedback(q1.query_id, 3, 1.0).unwrap();
+        let after = e.counts_snapshot();
+
+        let d_ab = after[1] - before[1]; // counts[A][B]
+        let d_ac = after[2] - before[2]; // counts[A][C]
+        assert!(
+            d_ac > d_ab,
+            "credit must use the query-time (uniform) vocab: dAC={d_ac} should exceed dAB={d_ab}"
+        );
     }
 }
