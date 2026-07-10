@@ -2,7 +2,7 @@ pub mod graph;
 pub mod propagation;
 pub mod partitioning;
 pub mod rooms;
-// pub mod level_file;   // Task 4
+pub mod level_file;
 pub mod queries;
 pub mod embeddings;
 pub mod relation;
