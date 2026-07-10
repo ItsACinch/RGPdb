@@ -6,6 +6,7 @@ pub mod level_file;
 pub mod queries;
 pub mod embeddings;
 pub mod relation;
+pub mod transitions;
 pub mod error;
 pub mod rag;
 
