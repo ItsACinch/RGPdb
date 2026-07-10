@@ -10,6 +10,7 @@ use lru::LruCache;
 use thiserror::Error;
 
 use crate::credit::credit;
+use crate::depth_weights::DepthWeights;
 use crate::graph::{Graph, NodeId, RelationId};
 use crate::propagation::{propagate, PropagationParams};
 use crate::relation::RelationVocab;
@@ -35,15 +36,23 @@ pub struct QueryResult {
     pub query_id: QueryId,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct EngineConfig {
     pub cache_capacity: usize,
     pub cache_ttl: Duration,
+    /// Applied to queries whose caller omits `depth_weights`, but only when its
+    /// length matches the query's `max_depth + 1`; otherwise the query runs uniform.
+    /// Defaults to `uniform` (all-ones), so out-of-the-box behavior is unchanged.
+    pub default_depth_weights: DepthWeights,
 }
 
 impl Default for EngineConfig {
     fn default() -> Self {
-        Self { cache_capacity: 4096, cache_ttl: Duration::from_secs(3600) }
+        Self {
+            cache_capacity: 4096,
+            cache_ttl: Duration::from_secs(3600),
+            default_depth_weights: DepthWeights::uniform(4),
+        }
     }
 }
 
@@ -131,8 +140,21 @@ impl RgdbEngine {
         query_relation: Option<RelationId>,
         params: &PropagationParams,
     ) -> QueryResult {
+        // Caller's weights win; else apply the config default when its length fits
+        // this query's max_depth; else leave uniform.
+        let resolved = if params.depth_weights.is_some() {
+            params.clone()
+        } else if self.engine_cfg.default_depth_weights.as_slice().len() == params.max_depth + 1 {
+            PropagationParams {
+                depth_weights: Some(self.engine_cfg.default_depth_weights.clone()),
+                ..params.clone()
+            }
+        } else {
+            params.clone()
+        };
+
         let vocab = self.vocab.load_full();
-        let totals = propagate(&self.graph, &vocab, seeds, query_relation, params);
+        let totals = propagate(&self.graph, &vocab, seeds, query_relation, &resolved);
         let mut ranked: Vec<(NodeId, f32)> = totals.into_iter().collect();
         ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
@@ -142,7 +164,7 @@ impl RgdbEngine {
             QueryContext {
                 seeds: seeds.to_vec(),
                 query_relation,
-                params: params.clone(),
+                params: resolved,
                 vocab,
                 created: Instant::now(),
             },
@@ -372,7 +394,11 @@ mod tests {
             g,
             prior,
             TransitionConfig { rebuild_every_n: 0, ..TransitionConfig::default() },
-            EngineConfig { cache_capacity: 8, cache_ttl: Duration::from_millis(1) },
+            EngineConfig {
+                cache_capacity: 8,
+                cache_ttl: Duration::from_millis(1),
+                default_depth_weights: DepthWeights::uniform(4),
+            },
         );
         let r = e.query(&[(0, 1.0)], Some(0), &params());
         std::thread::sleep(Duration::from_millis(10));
@@ -436,5 +462,44 @@ mod tests {
             d_ac > d_ab,
             "credit must use the query-time (uniform) vocab: dAC={d_ac} should exceed dAB={d_ab}"
         );
+    }
+
+    #[test]
+    fn engine_default_depth_weights_are_applied_when_caller_omits_them() {
+        use crate::depth_weights::DepthWeights;
+        // Graph 0 -A-> 1 -B-> 2. terminal(2) scores ONLY depth-2 arrivals, so node 2
+        // (depth 2) ranks above node 1 (depth 1); under uniform, node 1 outranks it.
+        let ea = (1u32, EdgeProps { attenuation: 0.0, relation: 0, is_portal: false });
+        let eb = (2u32, EdgeProps { attenuation: 0.0, relation: 1, is_portal: false });
+        let g = Graph::from_adjacency(3, vec![vec![ea], vec![eb], vec![]], NodeProps::default()).unwrap();
+        let prior = RelationVocab::with_names_uniform(vec!["A".into(), "B".into()]);
+        let e = RgdbEngine::with_engine_config(
+            g,
+            prior,
+            TransitionConfig { rebuild_every_n: 0, ..TransitionConfig::default() },
+            EngineConfig {
+                cache_capacity: 8,
+                cache_ttl: Duration::from_secs(3600),
+                default_depth_weights: DepthWeights::terminal(4, 2).unwrap(),
+            },
+        );
+        // Caller passes None -> engine applies its terminal(2) default (max_depth 4 matches).
+        let p = PropagationParams { max_depth: 4, min_intensity: 0.0, depth_weights: None };
+        let r = e.query(&[(0, 1.0)], Some(0), &p);
+        assert_eq!(r.ranked.first().map(|x| x.0), Some(2), "terminal(2) default ranks node 2 first");
+    }
+
+    #[test]
+    fn caller_depth_weights_override_the_engine_default() {
+        use crate::depth_weights::DepthWeights;
+        let e = engine(0); // 0 -A-> 1 -B-> 2, default config = uniform
+        // Caller forces terminal(1): node 1 (depth 1) must rank first.
+        let p = PropagationParams {
+            max_depth: 4,
+            min_intensity: 0.0,
+            depth_weights: Some(DepthWeights::terminal(4, 1).unwrap()),
+        };
+        let r = e.query(&[(0, 1.0)], Some(0), &p);
+        assert_eq!(r.ranked.first().map(|x| x.0), Some(1), "caller terminal(1) ranks node 1 first");
     }
 }
