@@ -77,20 +77,31 @@ impl TransitionStore {
 which makes cold start fall out for free:
 
 ```
-C'[a][b] = C[a][b] + κ · P[a][b]          // pseudo-count blend
-M[a][b]  = C'[a][b] / max_b C'[a][b]      // row-max normalize
-M[a][a]  = 1.0                            // diagonal pinned
-M[a][b]  = max(M[a][b], ε)   (a != b)     // floor: never fully kill a path
+C'[a][b] = C[a][b] + κ · P[a][b]                  // pseudo-count blend
+rowmax_a = max over b != a of C'[a][b]            // OFF-DIAGONAL max only
+M[a][a]  = 1.0                                    // diagonal pinned, independent
+M[a][b]  = max(C'[a][b] / rowmax_a, ε)   (b != a) // normalize + floor
+                                                  // rowmax_a == 0  =>  M[a][b] = 1.0
 ```
 
-With the default uniform prior (`P` all-ones) and zero evidence, every row
-normalizes to all-ones → the matrix is **exactly** uniform → pure typed PPR, zero
-refraction penalty. **Do no harm before you have evidence.** As credit accumulates,
-`C` dominates `κ·P` and the matrix converges on the learned transitions. `κ` is
-literally "how much evidence before I stop trusting the prior."
+With the default uniform prior (`P` all-ones) and zero evidence, `C'[a][b] = κ` for
+every `b != a`, so `rowmax_a = κ` and every off-diagonal normalizes to `1.0` → the
+matrix is **exactly** uniform → pure typed PPR, zero refraction penalty. **Do no harm
+before you have evidence.** As credit accumulates, `C` dominates `κ·P` and the matrix
+converges on the learned transitions. `κ` is literally "how much evidence before I
+stop trusting the prior."
 
-The diagonal must stay pinned at 1.0: `sim(query_relation, same_relation) = 1` is
-what makes the 1-hop case work (0.999). Never learn it away.
+**The row-max must exclude the diagonal.** A 1-hop typed query places *all* of its
+credit on `(r, r)`, because its only hop stays on the query relation. If the diagonal
+participated in the row max, `C'[a][a]` would grow without bound, every off-diagonal
+would be divided by it and floor out at `ε`, and the matrix would collapse back to
+"penalize every relation change" — precisely the pathology this design exists to fix.
+Diagonal credit is therefore *recorded but ignored* by the derivation, and `M[a][a]`
+is pinned to `1.0` independently. That pin is also what makes the 1-hop case work
+(`sim(query_relation, same_relation) = 1`, MRR 0.999). Never learn it away.
+
+Semantically this is right: a 1-hop query teaches you nothing about transitions
+*between different* relations, and contributes no off-diagonal evidence.
 
 Signals are **signed**: `C[a][b] += signal · credit[a][b]`, clamped to `≥ 0`. An
 application can report "this answer was wrong" as negative reinforcement.
@@ -129,6 +140,17 @@ in exact proportion to how much of the target's mass traversed that transition.
 event therefore contributes exactly `signal` total evidence, so a high-mass target
 cannot dominate the counts simply by being well-connected. If `Σ flow == 0` the
 target is unreachable and `credit()` returns empty.
+
+**Hops with no incoming relation contribute nothing.** On an untyped query
+(`query_relation == None`) the first hop has `r_in = None`, which is not a
+representable transition in an `n × n` matrix. Those hops are skipped for crediting.
+Typed queries seed `r_in = Some(query_relation)`, so every hop yields a transition.
+
+**Credit uses the vocab that produced the ranking**, not whichever matrix is live when
+feedback arrives — a `refresh()` may have swapped it in between. The query context
+therefore retains the `Arc<RelationVocab>` used at query time and hands it to
+`credit()`. Attributing flow under a different matrix than the one that generated the
+answer would silently mis-credit every transition.
 
 **Correctness invariant (the property test).** Note that `Σ flow` is *not* the
 target's mass — the decomposition counts each path once per edge, so `Σ flow` equals
@@ -176,6 +198,7 @@ pub struct RgdbEngine {
     vocab: ArcSwap<RelationVocab>,           // live matrix; lock-free reads
     store: Mutex<TransitionStore>,           // counts; tiny, writes serialized
     cache: Mutex<LruCache<QueryId, QueryContext>>,  // bounded + TTL
+    // QueryContext { seeds, query_relation, params, vocab: Arc<RelationVocab>, created: Instant }
     next_id: AtomicU64,
 }
 
@@ -226,9 +249,14 @@ save():    counts + prior + config + relation names + checksum → sidecar
 
 **Sidecar snapshot** `<level>.transitions`: magic, version, `n_relations`, relation
 **names**, counts matrix, prior matrix, config, checksum. Written temp-then-rename so
-a crash mid-write cannot corrupt it. The relation names are validated against the
-graph's vocabulary on load — a transition matrix is meaningless against a different
-relation set, and silently accepting one would corrupt every subsequent query.
+a crash mid-write cannot corrupt it.
+
+`Graph` stores relation *ids*, not names, so "names match the graph" is not a check we
+can make. The enforceable invariant is **relation coverage**: `RgdbEngine::load`
+verifies the snapshot's `n_relations` exceeds the maximum relation id appearing on any
+edge, and refuses to load otherwise. A matrix that doesn't cover every relation the
+graph uses would silently return `similarity() == 0.0` for the uncovered ones and kill
+those paths.
 
 **The level file stays immutable.** It is build-once and mmap'd; learned state is
 small, hot, and mutable. Mixing them would destroy that property.
@@ -259,7 +287,7 @@ signal)` overload is a thin wrapper if any of the above bites.
 | `FeedbackError::UnknownQuery(id)` | evicted / expired / never issued | return error; record nothing |
 | `FeedbackError::InvalidTarget(node)` | target out of graph bounds | return error; record nothing |
 | `FeedbackError::TargetUnreachable` | no seed→target path within `max_depth` (credits all zero) | return error; record nothing |
-| `TransitionError::VocabMismatch` | sidecar relation names ≠ graph relations | refuse to load |
+| `TransitionError::RelationCoverage` | sidecar covers fewer relations than the graph's max relation id | refuse to load |
 | `TransitionError::BadShape` | counts/prior not `n×n` | refuse to construct |
 
 Nothing is ever silently dropped. A feedback event either updates counts or returns
@@ -267,10 +295,11 @@ an error saying why it didn't.
 
 ## Testing
 
-- **Unit — `TransitionStore`:** derivation rule (pseudo-count blend, row-max
-  normalization, pinned diagonal, floor); **uniform prior + zero evidence yields an
+- **Unit — `TransitionStore`:** derivation rule (pseudo-count blend, **off-diagonal**
+  row-max normalization, pinned diagonal, floor); heavy diagonal credit must NOT
+  shrink off-diagonals; **uniform prior + zero evidence yields an
   exactly all-ones matrix** (cold start == typed PPR); signed signals clamp at 0;
-  save/load roundtrip; vocab-mismatch refusal.
+  save/load roundtrip; relation-coverage refusal.
 - **Unit — `credit()`:** hand-computed flows on the tiny graphs the kernel tests
   already use (chain, branch, multi-path); credits are L1-normalized (sum to 1.0);
   an unreachable target yields empty credits; plus the **forward/backward
