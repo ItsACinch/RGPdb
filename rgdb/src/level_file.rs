@@ -5,7 +5,7 @@ use crate::rooms::RoomCollection;
 use crate::relation::RelationVocab;
 use memmap2::MmapOptions;
 use std::fs::File;
-use std::io::{Read, Write, Seek, SeekFrom};
+use std::io::{Read, Write};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use thiserror::Error;
 
@@ -234,6 +234,60 @@ mod tests {
         assert_eq!(r2.num_rooms(), rooms.num_rooms());
         assert_eq!(v2.id_of("causes"), Some(1));
         assert!((v2.similarity(0, 1) - 0.3).abs() < 1e-6);
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn roundtrip_zero_edges_zero_rooms() {
+        let graph = Graph::new(3).unwrap();
+        let rooms = RoomCollection::from_room_map(graph.room_map());
+        let vocab = RelationVocab::uniform(1);
+
+        let path = "test_level_v2_zero_edges.rgdb";
+        write_level_file(&graph, &rooms, &vocab, path).unwrap();
+        let (g2, r2, v2) = read_level_file_mmap(path).unwrap();
+
+        assert_eq!(g2.num_nodes(), 3);
+        assert_eq!(g2.num_edges(), 0);
+        assert_eq!(v2.len(), vocab.len());
+        assert_eq!(r2.num_rooms(), rooms.num_rooms());
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn roundtrip_empty_vocab() {
+        let graph = Graph::new(2).unwrap();
+        let rooms = RoomCollection::from_room_map(graph.room_map());
+        let vocab = RelationVocab::new(vec![], vec![]).unwrap();
+
+        let path = "test_level_v2_empty_vocab.rgdb";
+        write_level_file(&graph, &rooms, &vocab, path).unwrap();
+        let (g2, _r2, v2) = read_level_file_mmap(path).unwrap();
+
+        assert_eq!(g2.num_nodes(), 2);
+        assert_eq!(g2.num_edges(), 0);
+        assert_eq!(v2.len(), 0);
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn roundtrip_multibyte_relation_name() {
+        let graph = Graph::new(2).unwrap();
+        let rooms = RoomCollection::from_room_map(graph.room_map());
+        let vocab = RelationVocab::new(
+            vec!["café".into(), "naïve".into()],
+            vec![1.0, 0.3, 0.3, 1.0],
+        ).unwrap();
+
+        let path = "test_level_v2_multibyte_relation.rgdb";
+        write_level_file(&graph, &rooms, &vocab, path).unwrap();
+        let (_g2, _r2, v2) = read_level_file_mmap(path).unwrap();
+
+        assert_eq!(v2.name(0), Some("café"));
+        assert_eq!(v2.id_of("naïve"), Some(1));
 
         let _ = fs::remove_file(path);
     }
