@@ -6,6 +6,7 @@ use rgdb::relation::RelationVocab;
 use rgdb::propagation::{propagate as rust_propagate, PropagationParams};
 use rgdb::engine::{RgdbEngine, QueryId};
 use rgdb::transitions::TransitionConfig;
+use rgdb::depth_weights::DepthWeights;
 
 #[pyclass(name = "RgdbGraph")]
 struct PyGraph { inner: Graph }
@@ -68,8 +69,20 @@ fn build_graph(
     Ok(PyGraph { inner: graph })
 }
 
+fn to_depth_weights(
+    depth_weights: Option<Vec<f32>>,
+    max_depth: usize,
+) -> PyResult<Option<DepthWeights>> {
+    match depth_weights {
+        None => Ok(None),
+        Some(v) => DepthWeights::from_vec(v, max_depth)
+            .map(Some)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("{e}"))),
+    }
+}
+
 #[pyfunction]
-#[pyo3(signature = (graph, vocab, seeds, query_relation=None, max_depth=4, min_intensity=1e-3))]
+#[pyo3(signature = (graph, vocab, seeds, query_relation=None, max_depth=4, min_intensity=1e-3, depth_weights=None))]
 fn propagate(
     graph: &PyGraph,
     vocab: &PyVocab,
@@ -77,10 +90,15 @@ fn propagate(
     query_relation: Option<u16>,
     max_depth: usize,
     min_intensity: f32,
-) -> Vec<(u32, f32)> {
-    let params = PropagationParams { max_depth, min_intensity, depth_weights: None };
+    depth_weights: Option<Vec<f32>>,
+) -> PyResult<Vec<(u32, f32)>> {
+    let params = PropagationParams {
+        max_depth,
+        min_intensity,
+        depth_weights: to_depth_weights(depth_weights, max_depth)?,
+    };
     let totals = rust_propagate(&graph.inner, &vocab.inner, &seeds, query_relation, &params);
-    totals.into_iter().collect()
+    Ok(totals.into_iter().collect())
 }
 
 #[pyclass(name = "Engine")]
@@ -102,11 +120,22 @@ impl PyEngine {
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("{e}")))
     }
 
-    #[pyo3(signature = (seeds, query_relation=None, max_depth=4, min_intensity=1e-3))]
-    fn query(&self, seeds: Vec<(u32, f32)>, query_relation: Option<u16>, max_depth: usize, min_intensity: f32) -> (Vec<(u32, f32)>, u64) {
-        let params = PropagationParams { max_depth, min_intensity, depth_weights: None };
+    #[pyo3(signature = (seeds, query_relation=None, max_depth=4, min_intensity=1e-3, depth_weights=None))]
+    fn query(
+        &self,
+        seeds: Vec<(u32, f32)>,
+        query_relation: Option<u16>,
+        max_depth: usize,
+        min_intensity: f32,
+        depth_weights: Option<Vec<f32>>,
+    ) -> PyResult<(Vec<(u32, f32)>, u64)> {
+        let params = PropagationParams {
+            max_depth,
+            min_intensity,
+            depth_weights: to_depth_weights(depth_weights, max_depth)?,
+        };
         let r = self.inner.query(&seeds, query_relation, &params);
-        (r.ranked, r.query_id)
+        Ok((r.ranked, r.query_id))
     }
 
     #[pyo3(signature = (query_id, target, signal=1.0))]
