@@ -275,17 +275,53 @@ mod tests {
 
     #[test]
     fn feedback_then_refresh_changes_the_matrix() {
-        let e = engine(0); // manual refresh only
-        let r = e.query(&[(0, 1.0)], Some(0), &params());
-        e.record_feedback(r.query_id, 2, 100.0).unwrap();
-        // not refreshed yet -> still uniform
+        // Three relations, so row A has TWO off-diagonals. With only two relations the
+        // single off-diagonal always normalizes to 1.0 and this test could not
+        // discriminate. Graph: 0 -(A=0)-> 1 -(B=1)-> 2, and 0 -(C=2)-> 3.
+        let ea = (1u32, EdgeProps { attenuation: 0.0, relation: 0, is_portal: false });
+        let ec = (3u32, EdgeProps { attenuation: 0.0, relation: 2, is_portal: false });
+        let eb = (2u32, EdgeProps { attenuation: 0.0, relation: 1, is_portal: false });
+        let g = Graph::from_adjacency(
+            4,
+            vec![vec![ea, ec], vec![eb], vec![], vec![]],
+            NodeProps::default(),
+        )
+        .unwrap();
+        let prior = RelationVocab::with_names_uniform(vec!["A".into(), "B".into(), "C".into()]);
+        let e = RgdbEngine::new(
+            g,
+            prior,
+            TransitionConfig { rebuild_every_n: 0, ..TransitionConfig::default() },
+        );
+
+        // Cold start: do no harm, everything is exactly 1.0.
         assert_eq!(e.vocab().similarity(0, 1), 1.0);
+        assert_eq!(e.vocab().similarity(0, 2), 1.0);
+
+        let p = PropagationParams { max_depth: 2, min_intensity: 0.0 };
+        let r = e.query(&[(0, 1.0)], Some(0), &p);
+        e.record_feedback(r.query_id, 2, 100.0).unwrap();
+
+        // Recorded, but not rebuilt yet: the live matrix must not have moved.
+        assert_eq!(e.vocab().similarity(0, 2), 1.0, "no refresh yet");
+
         e.refresh();
-        // A->B was credited; A->A (diagonal) stays pinned
-        assert_eq!(e.vocab().similarity(0, 0), 1.0);
-        assert_eq!(e.vocab().similarity(0, 1), 1.0, "credited transition becomes the row max");
-        // B has no outgoing evidence, so its row stays uniform
-        assert_eq!(e.vocab().similarity(1, 0), 1.0);
+
+        // Credit for target 2 splits 0.5 on (A,A) and 0.5 on (A,B); signal 100 puts
+        // 50 into counts[A][B] and 50 into counts[A][A] (diagonal, ignored by derive).
+        // Row A off-diagonals: blended(A,B) = 50 + 10 = 60, blended(A,C) = 0 + 10 = 10,
+        // off-diagonal rowmax = 60.
+        assert_eq!(e.vocab().similarity(0, 0), 1.0, "diagonal stays pinned");
+        assert!(
+            (e.vocab().similarity(0, 1) - 1.0).abs() < 1e-5,
+            "credited A->B becomes the row max, got {}",
+            e.vocab().similarity(0, 1)
+        );
+        assert!(
+            (e.vocab().similarity(0, 2) - (10.0 / 60.0)).abs() < 1e-4,
+            "uncredited A->C must drop below 1.0, got {}",
+            e.vocab().similarity(0, 2)
+        );
     }
 
     #[test]
