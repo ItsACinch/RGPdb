@@ -8,12 +8,16 @@ from ..embeddings import embed_texts
 
 
 class NewRgdbRanker:
-    def __init__(self, graph: TypedGraph, vocab_mode: str = "refraction"):
-        if vocab_mode not in ("refraction", "uniform"):
+    def __init__(self, graph: TypedGraph, vocab_mode: str = "refraction",
+                 sim_matrix=None, name: str | None = None):
+        # sim_matrix (n x n, row-major) overrides vocab_mode when provided —
+        # used to supply a learned/explicit relation-transition matrix.
+        if sim_matrix is None and vocab_mode not in ("refraction", "uniform"):
             raise ValueError(vocab_mode)
         self.graph = graph
         self.vocab_mode = vocab_mode
-        self.name = f"rgdb-new-{vocab_mode}"
+        self.name = name or (f"rgdb-new-{vocab_mode}" if sim_matrix is None
+                             else "rgdb-new-trained")
 
         adj = [[] for _ in range(graph.num_nodes)]
         for (s, d, rel_id) in graph.edges:
@@ -21,7 +25,10 @@ class NewRgdbRanker:
         self._g = core.build_graph(graph.num_nodes, adj)
 
         n = len(graph.relations)
-        if vocab_mode == "uniform":
+        if sim_matrix is not None:
+            flat = np.asarray(sim_matrix, dtype=np.float32).ravel().tolist()
+            self._vocab = core.vocab_from_matrix(list(graph.relations), flat)
+        elif vocab_mode == "uniform":
             self._vocab = core.uniform_vocab(n)
         else:
             rel_vecs = embed_texts(list(graph.relations))

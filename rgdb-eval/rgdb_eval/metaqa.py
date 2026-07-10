@@ -21,6 +21,17 @@ _BASE_TYPE_RELATIONS = {
 }
 
 
+def _type_pair_to_relation(a: str, b: str) -> str | None:
+    # normalize singular/plural token variants (e.g. "tag" vs "tags")
+    norm = {"tag": "tags"}
+    a, b = norm.get(a, a), norm.get(b, b)
+    if (a, b) in _BASE_TYPE_RELATIONS:
+        return _BASE_TYPE_RELATIONS[(a, b)]
+    if (b, a) in _BASE_TYPE_RELATIONS:
+        return _BASE_TYPE_RELATIONS[(b, a)] + "_inv"
+    return None
+
+
 def query_relation_from_qtype(qtype: str) -> str | None:
     """First-hop relation implied by a MetaQA qtype.
 
@@ -32,14 +43,24 @@ def query_relation_from_qtype(qtype: str) -> str | None:
     parts = qtype.strip().split("_to_")
     if len(parts) < 2:
         return None
-    # normalize singular/plural token variants (e.g. "tag" vs "tags")
-    norm = {"tag": "tags"}
-    a, b = norm.get(parts[0], parts[0]), norm.get(parts[1], parts[1])
-    if (a, b) in _BASE_TYPE_RELATIONS:
-        return _BASE_TYPE_RELATIONS[(a, b)]
-    if (b, a) in _BASE_TYPE_RELATIONS:
-        return _BASE_TYPE_RELATIONS[(b, a)] + "_inv"
-    return None
+    return _type_pair_to_relation(parts[0], parts[1])
+
+
+def qtype_to_relation_sequence(qtype: str) -> list[str]:
+    """Full gold relation sequence implied by a qtype (one relation per hop).
+
+    ``movie_to_actor_to_movie_to_director`` ->
+    ``["starred_actors", "starred_actors_inv", "directed_by"]``.
+    Returns [] if any segment can't be resolved.
+    """
+    parts = qtype.strip().split("_to_")
+    seq: list[str] = []
+    for i in range(len(parts) - 1):
+        r = _type_pair_to_relation(parts[i], parts[i + 1])
+        if r is None:
+            return []
+        seq.append(r)
+    return seq
 
 
 def parse_kb_line(line: str) -> tuple[str, str, str]:
