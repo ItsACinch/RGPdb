@@ -137,7 +137,7 @@ impl PyEngine {
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("{e}")))
     }
 
-    #[pyo3(signature = (seeds, query_relation=None, max_depth=4, min_intensity=1e-3, depth_weights=None))]
+    #[pyo3(signature = (seeds, query_relation=None, max_depth=4, min_intensity=1e-3, depth_weights=None, hop_hint=None))]
     fn query(
         &self,
         seeds: Vec<(u32, f32)>,
@@ -145,13 +145,14 @@ impl PyEngine {
         max_depth: usize,
         min_intensity: f32,
         depth_weights: Option<Vec<f32>>,
+        hop_hint: Option<usize>,
     ) -> PyResult<(Vec<(u32, f32)>, u64)> {
         let params = PropagationParams {
             max_depth,
             min_intensity,
             depth_weights: to_depth_weights(depth_weights, max_depth)?,
         };
-        let r = self.inner.query(&seeds, query_relation, &params);
+        let r = self.inner.query(&seeds, query_relation, hop_hint, &params);
         Ok((r.ranked, r.query_id))
     }
 
@@ -163,6 +164,7 @@ impl PyEngine {
     }
 
     fn refresh(&self) { self.inner.refresh(); }
+    fn refresh_profiles(&self) { self.inner.refresh_profiles(); }
     fn matrix(&self) -> Vec<f32> { self.inner.matrix() }
     fn counts(&self) -> Vec<f32> { self.inner.counts_snapshot() }
     fn events_since_rebuild(&self) -> u32 { self.inner.events_since_rebuild() }
