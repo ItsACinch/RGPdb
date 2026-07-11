@@ -79,6 +79,26 @@ The scalar `propagate` stays as the fast path (a `Vec<f32>` per node costs more 
 scalar; only paid when features are needed). Pruning still tests raw `transmitted`, as
 in the scalar kernel.
 
+> **MEASURED OUTCOME (2026-07-11): #2's learning is a dead end; the plumbing is kept,
+> the learning is disabled by default.** The full-set MetaQA gate
+> (`scripts/investigate_soft_depth_derivation.py`, `results/metaqa-soft-depth-weights.md`)
+> showed BOTH the discriminative derivation below and a generative alternative lose to
+> hard `terminal(k)` at 3 hops (MRR 0.28 / recall@20 0.49 vs terminal(3)'s 0.38 / 0.53).
+> Root cause: the 3-hop answer's arrival mass is ~76% at depth 1 (it is usually also
+> reachable via a 1-hop shortcut), but so are the distractors — any `c` derived from
+> answer-mass up-weights depth 1 and drowns the answer. `terminal(k)` wins by isolating
+> the depth where answer and distractors SEPARATE, not where the answer's mass is. No
+> single per-depth vector learned from answer-mass statistics can beat `terminal(k)`;
+> separating same-depth answer from distractor needs a per-NODE model — which is #4.
+>
+> **Disposition:** keep the `hop_hint` API (its cold start IS `terminal(k)`, a useful
+> ergonomic) and the `DepthProfileStore` type (the seam), but gate the feedback-driven
+> depth-profile update behind `EngineConfig.depth_profile_learning`, default **false**.
+> Default behavior: `hop_hint` → `terminal(k)`, no drift. The 2-hop case is healthy
+> (soft-c matches terminal(2) at 0.61), so the seam is not worthless — but it is off by
+> default until a per-node-aware derivation exists. The derivation below is retained as
+> the opt-in path; it is NOT the recommended default.
+
 ## Component #2 — Learned soft depth weights (`DepthProfileStore`)
 
 A sibling of `TransitionStore`, in `rgdb/src/depth_profile.rs`.
