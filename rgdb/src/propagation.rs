@@ -135,6 +135,102 @@ pub fn propagate_single(
     totals
 }
 
+/// Per-node intensity broken out by arrival depth, plus each node's heaviest
+/// incoming relation. The per-depth values are RAW (un-weighted): applying a
+/// `DepthWeights` to them reconstructs `propagate`'s scalar output. `depth_weights`
+/// in `params` is ignored here — weighting is the consumer's job.
+#[derive(Debug, Clone, Default)]
+pub struct LayeredResult {
+    /// node -> `[I_0, I_1, .., I_maxdepth]`; index d = mass arriving after exactly d hops.
+    pub per_depth: HashMap<NodeId, Vec<f32>>,
+    /// node -> the incoming relation that delivered the most mass (absent for seeds).
+    pub dominant_incoming: HashMap<NodeId, RelationId>,
+}
+
+pub fn propagate_layered(
+    graph: &Graph,
+    vocab: &RelationVocab,
+    seeds: &[(NodeId, f32)],
+    query_relation: Option<RelationId>,
+    params: &PropagationParams,
+) -> LayeredResult {
+    let d_max = params.max_depth;
+    let n = graph.num_nodes();
+    let mut per_depth: HashMap<NodeId, Vec<f32>> = HashMap::new();
+    let mut incoming: HashMap<NodeId, HashMap<RelationId, f32>> = HashMap::new();
+    let mut denom_cache: HashMap<NodeId, f32> = HashMap::new();
+
+    // Linear in seed mass, so accumulate each single-seed walk into shared maps.
+    for &(seed, initial_mass) in seeds {
+        if (seed as usize) >= n || initial_mass < params.min_intensity {
+            continue;
+        }
+        per_depth.entry(seed).or_insert_with(|| vec![0.0; d_max + 1])[0] += initial_mass;
+
+        let mut frontier: HashMap<FrontierKey, f32> = HashMap::new();
+        frontier.insert((seed, query_relation), initial_mass);
+
+        for depth in 0..d_max {
+            if frontier.is_empty() {
+                break;
+            }
+            let mut next: HashMap<FrontierKey, f32> = HashMap::new();
+            for (&(u, r_in), &mass) in frontier.iter() {
+                if mass < params.min_intensity {
+                    continue;
+                }
+                let props = graph.node_props()[u as usize];
+                let refl = props.reflection;
+                if refl <= 0.0 {
+                    continue;
+                }
+                let rix = props.refraction_index;
+                let denom = *denom_cache.entry(u).or_insert_with(|| {
+                    let mut s = 0.0f32;
+                    for (_v, ep) in graph.neighbors(u) {
+                        s += (1.0 - ep.attenuation).max(0.0);
+                    }
+                    s
+                });
+                if denom <= 0.0 {
+                    continue;
+                }
+                for (v, ep) in graph.neighbors(u) {
+                    let base = (1.0 - ep.attenuation).max(0.0);
+                    if base <= 0.0 {
+                        continue;
+                    }
+                    let p = base / denom;
+                    let sim = match r_in {
+                        Some(a) => vocab.similarity(a, ep.relation),
+                        None => 1.0,
+                    };
+                    let sim_term = if rix == 1.0 { sim } else { sim.powf(rix) };
+                    let transmitted = mass * refl * p * sim_term;
+                    if transmitted < params.min_intensity {
+                        continue;
+                    }
+                    per_depth.entry(v).or_insert_with(|| vec![0.0; d_max + 1])[depth + 1] += transmitted;
+                    *incoming.entry(v).or_default().entry(ep.relation).or_insert(0.0) += transmitted;
+                    *next.entry((v, Some(ep.relation))).or_insert(0.0) += transmitted;
+                }
+            }
+            frontier = next;
+        }
+    }
+
+    let dominant_incoming = incoming
+        .into_iter()
+        .filter_map(|(node, rels)| {
+            rels.into_iter()
+                .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+                .map(|(r, _)| (node, r))
+        })
+        .collect();
+
+    LayeredResult { per_depth, dominant_incoming }
+}
+
 /// Convert intensity to a "light distance": d = -log(I + eps).
 pub fn intensity_to_distance(intensities: &[f32], eps: f32) -> Vec<f32> {
     intensities
@@ -293,5 +389,55 @@ mod tests {
         };
         let t = propagate_single(&g, &vocab, 0, 1.0, Some(0), &p);
         assert!((t[&3] - 0.001 * 0.614125).abs() < 1e-7, "node 3 = {}", t[&3]);
+    }
+
+    #[test]
+    fn layered_decomposes_the_chain_by_arrival_depth() {
+        let g = chain(); // 0->1->2->3
+        let vocab = RelationVocab::uniform(1);
+        let p = PropagationParams { max_depth: 3, min_intensity: 1e-6, depth_weights: None };
+        let r = propagate_layered(&g, &vocab, &[(0, 1.0)], Some(0), &p);
+        // node k arrives only at depth k on a pure chain.
+        assert_eq!(r.per_depth[&0], vec![1.0, 0.0, 0.0, 0.0]);
+        assert!((r.per_depth[&1][1] - 0.85).abs() < 1e-5);
+        assert!((r.per_depth[&2][2] - 0.7225).abs() < 1e-5);
+        assert!((r.per_depth[&3][3] - 0.614125).abs() < 1e-5);
+        assert_eq!(r.per_depth[&3][1], 0.0);
+    }
+
+    #[test]
+    fn layered_collapses_to_scalar_propagate_for_any_weights() {
+        // Σ_d c[d]·layered[v][d] must equal propagate(v) under the SAME c, exactly.
+        let g = chain();
+        let vocab = RelationVocab::uniform(1);
+        for c in [
+            crate::depth_weights::DepthWeights::uniform(3),
+            crate::depth_weights::DepthWeights::terminal(3, 2).unwrap(),
+            crate::depth_weights::DepthWeights::from_vec(vec![0.0, 0.3, 0.7, 1.0], 3).unwrap(),
+        ] {
+            let p = PropagationParams { max_depth: 3, min_intensity: 0.0, depth_weights: Some(c.clone()) };
+            let scalar = propagate_single(&g, &vocab, 0, 1.0, Some(0), &p);
+            let layered = propagate_layered(&g, &vocab, &[(0, 1.0)], Some(0), &p);
+            let cs = c.as_slice();
+            for (&v, prof) in &layered.per_depth {
+                let collapsed: f32 = prof.iter().zip(cs).map(|(x, w)| x * w).sum();
+                let want = scalar.get(&v).copied().unwrap_or(0.0);
+                assert!((collapsed - want).abs() < 1e-5, "node {v}: {collapsed} != {want}");
+            }
+        }
+    }
+
+    #[test]
+    fn layered_reports_dominant_incoming_relation() {
+        // 0 -(A=0)-> 1 -(B=1)-> 2 ; node 1's only incoming is A, node 2's is B.
+        let ea = (1u32, EdgeProps { attenuation: 0.0, relation: 0, is_portal: false });
+        let eb = (2u32, EdgeProps { attenuation: 0.0, relation: 1, is_portal: false });
+        let g = Graph::from_adjacency(3, vec![vec![ea], vec![eb], vec![]], NodeProps::default()).unwrap();
+        let vocab = RelationVocab::uniform(2);
+        let p = PropagationParams { max_depth: 2, min_intensity: 1e-6, depth_weights: None };
+        let r = propagate_layered(&g, &vocab, &[(0, 1.0)], Some(0), &p);
+        assert_eq!(r.dominant_incoming.get(&1), Some(&0));
+        assert_eq!(r.dominant_incoming.get(&2), Some(&1));
+        assert_eq!(r.dominant_incoming.get(&0), None); // the seed has no incoming edge
     }
 }

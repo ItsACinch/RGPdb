@@ -186,6 +186,10 @@ pub fn credit(
     //   G_k[(v,r)] = Σ_{j=0}^{d-k-1} c[k+1+j] · B[j][(v,r)]
     // so the flow loop stays O(edges) rather than O(edges · d).
     let c = params.depth_weights.as_ref().map(|w| w.as_slice());
+    debug_assert!(
+        c.map_or(true, |cc| cc.len() == params.max_depth + 1),
+        "depth_weights length must equal max_depth + 1"
+    );
     let weight_at = |depth: usize| -> f32 { c.map_or(1.0, |cc| cc[depth]) };
     let mut gk: Vec<HashMap<State, f32>> = vec![HashMap::new(); d];
     for k in 0..d {
@@ -262,6 +266,10 @@ pub fn backward_mass_at_target(
     let b = backward(graph, vocab, target, &ball, params, &mut denom_cache);
 
     let c = params.depth_weights.as_ref().map(|w| w.as_slice());
+    debug_assert!(
+        c.map_or(true, |cc| cc.len() == params.max_depth + 1),
+        "depth_weights length must equal max_depth + 1"
+    );
     let weight_at = |depth: usize| -> f32 { c.map_or(1.0, |cc| cc[depth]) };
     seeds
         .iter()
