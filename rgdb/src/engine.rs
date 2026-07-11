@@ -51,6 +51,11 @@ pub struct EngineConfig {
     /// at 3 hops (see docs/superpowers/specs/2026-07-11-feedback-learned-ranking-design.md);
     /// this seam stays off until a per-node-aware derivation exists.
     pub depth_profile_learning: bool,
+    /// When false (default), the reranker is neither applied in `query` nor trained in
+    /// `record_feedback`. The current global reranker regresses 3-hop Hits@1
+    /// (see docs/superpowers/specs/2026-07-11-feedback-learned-ranking-design.md); it is
+    /// kept as an inert seam for a future query-conditioned extension. Default false.
+    pub reranker_enabled: bool,
 }
 
 impl Default for EngineConfig {
@@ -60,6 +65,7 @@ impl Default for EngineConfig {
             cache_ttl: Duration::from_secs(3600),
             default_depth_weights: DepthWeights::uniform(4),
             depth_profile_learning: false,
+            reranker_enabled: false,
         }
     }
 }
@@ -197,7 +203,7 @@ impl RgdbEngine {
         let topk_n = self.reranker.lock().unwrap().config().top_k;
         let ranked_topk: Vec<(NodeId, f32)> =
             ranked.iter().take(topk_n).copied().collect();
-        {
+        if self.engine_cfg.reranker_enabled {
             let rr = self.reranker.lock().unwrap();
             // Rerank only the top-K slice, leave the tail as-is.
             let mut head: Vec<(NodeId, f32)> = ranked.iter().take(topk_n).copied().collect();
@@ -290,9 +296,9 @@ impl RgdbEngine {
             }
         }
 
-        // Reranker: always trains from feedback (not gated by depth_profile_learning),
-        // under the query-time top-K and layered result.
-        {
+        // Reranker: trains from feedback only when enabled (default off — see
+        // EngineConfig::reranker_enabled), under the query-time top-K and layered result.
+        if self.engine_cfg.reranker_enabled {
             let mut rr = self.reranker.lock().unwrap();
             rr.update(&ctx.ranked_topk, target, &ctx.layered, &self.graph, signal);
         }
@@ -496,6 +502,7 @@ mod tests {
                 cache_ttl: Duration::from_millis(1),
                 default_depth_weights: DepthWeights::uniform(4),
                 depth_profile_learning: false,
+                reranker_enabled: false,
             },
         );
         let r = e.query(&[(0, 1.0)], Some(0), None, &params());
@@ -580,6 +587,7 @@ mod tests {
                 cache_ttl: Duration::from_secs(3600),
                 default_depth_weights: DepthWeights::terminal(4, 2).unwrap(),
                 depth_profile_learning: false,
+                reranker_enabled: false,
             },
         );
         // Caller passes None -> engine applies its terminal(2) default (max_depth 4 matches).
@@ -666,7 +674,12 @@ mod tests {
             5, vec![vec![a(1), a(2)], vec![], vec![a(3), a(4)], vec![], vec![]],
             NodeProps::default()).unwrap();
         let prior = RelationVocab::with_names_uniform(vec!["A".into()]);
-        let e = RgdbEngine::new(g, prior, TransitionConfig { rebuild_every_n: 0, ..TransitionConfig::default() });
+        let e = RgdbEngine::with_engine_config(
+            g,
+            prior,
+            TransitionConfig { rebuild_every_n: 0, ..TransitionConfig::default() },
+            EngineConfig { reranker_enabled: true, ..EngineConfig::default() },
+        );
         let p = PropagationParams { max_depth: 2, min_intensity: 0.0, depth_weights: None };
 
         // Cold: reranker is identity, so ranking is whatever diffusion produced.
@@ -684,5 +697,35 @@ mod tests {
         let pos1 = after.ranked.iter().position(|x| x.0 == 1).unwrap();
         let pos2 = after.ranked.iter().position(|x| x.0 == 2).unwrap();
         assert!(pos1 < pos2, "trained reranker should rank the leaf answer above the hub");
+    }
+
+    #[test]
+    fn reranker_disabled_by_default_does_not_reorder() {
+        // Same graph as reranker_is_identity_until_trained_then_reorders, but built with
+        // the DEFAULT engine config (reranker_enabled = false). Feedback must neither
+        // apply nor train the reranker, so the ranking after 300 rounds of feedback is
+        // identical to the cold (pre-feedback) ranking.
+        let a = |d| (d as u32, EdgeProps { attenuation: 0.0, relation: 0, is_portal: false });
+        let g = Graph::from_adjacency(
+            5, vec![vec![a(1), a(2)], vec![], vec![a(3), a(4)], vec![], vec![]],
+            NodeProps::default()).unwrap();
+        let prior = RelationVocab::with_names_uniform(vec!["A".into()]);
+        let e = RgdbEngine::new(g, prior, TransitionConfig { rebuild_every_n: 0, ..TransitionConfig::default() });
+        let p = PropagationParams { max_depth: 2, min_intensity: 0.0, depth_weights: None };
+
+        let cold = e.query(&[(0, 1.0)], Some(0), None, &p);
+        let cold_ranked = cold.ranked.clone();
+
+        // Train: node 1 (the leaf) is always "correct" -- with the reranker off, this
+        // must have no effect on ranking (no rerank applied, no training happens).
+        for _ in 0..300 {
+            let q = e.query(&[(0, 1.0)], Some(0), None, &p);
+            let _ = e.record_feedback(q.query_id, 1, 1.0);
+        }
+        let after = e.query(&[(0, 1.0)], Some(0), None, &p);
+        assert_eq!(
+            after.ranked, cold_ranked,
+            "reranker_enabled = false must leave the diffusion ranking untouched by feedback"
+        );
     }
 }

@@ -134,6 +134,20 @@ accumulators, config), atomic `write-temp-then-rename`.
 
 ## Component #4 — Hits@1 reranker (`Reranker`)
 
+> **MEASURED OUTCOME (2026-07-11): the online reranker regresses 3-hop Hits@1 (0.208 ->
+> 0.176) while improving recall@20 (+10%).** Root cause: the reranker learns only GLOBAL
+> feature preferences (one weight vector shared across all queries), so it cannot supply
+> the question-specific target relation that distinguishes a correct answer from a
+> same-depth, same-features distractor — the same wall #2 hit (see the MEASURED OUTCOME
+> note above): a global model cannot substitute for per-query conditioning.
+>
+> **Disposition:** gate the reranker off by default (`EngineConfig.reranker_enabled`,
+> default **false**) — it is applied in `query` and trained in `record_feedback` only
+> when explicitly enabled — mirroring `depth_profile_learning`. Keep the implementation
+> as an inert seam for a future query-conditioned extension (#3), which would let the
+> model condition its score on the query's target relation rather than learning one
+> global preference across all queries.
+
 An online linear model in `rgdb/src/reranker.rs`.
 
 **Features `φ(v)`** for a candidate `v` in the top-K, from the layered result:
