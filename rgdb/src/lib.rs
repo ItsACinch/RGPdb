@@ -1,6 +1,7 @@
 pub mod graph;
 pub mod propagation;
 pub mod depth_weights;
+pub mod depth_profile;
 pub mod partitioning;
 pub mod rooms;
 pub mod level_file;
@@ -22,6 +23,7 @@ pub mod cuda;
 pub use graph::*;
 pub use propagation::*;
 pub use depth_weights::{DepthWeights, DepthWeightsError};
+pub use depth_profile::{DepthProfileConfig, DepthProfileError, DepthProfileStore};
 pub use partitioning::*;
 pub use rooms::*;
 pub use relation::*;
