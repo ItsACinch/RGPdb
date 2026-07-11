@@ -45,6 +45,11 @@ pub struct EngineConfig {
     /// length matches the query's `max_depth + 1`; otherwise the query runs uniform.
     /// Defaults to `uniform` (all-ones), so out-of-the-box behavior is unchanged.
     pub default_depth_weights: DepthWeights,
+    /// When false (default), feedback does NOT update the depth profile, so `hop_hint`
+    /// resolves to a stable `terminal(k)`. The learned derivation is a measured dead end
+    /// at 3 hops (see docs/superpowers/specs/2026-07-11-feedback-learned-ranking-design.md);
+    /// this seam stays off until a per-node-aware derivation exists.
+    pub depth_profile_learning: bool,
 }
 
 impl Default for EngineConfig {
@@ -53,6 +58,7 @@ impl Default for EngineConfig {
             cache_capacity: 4096,
             cache_ttl: Duration::from_secs(3600),
             default_depth_weights: DepthWeights::uniform(4),
+            depth_profile_learning: false,
         }
     }
 }
@@ -242,24 +248,26 @@ impl RgdbEngine {
             return Err(FeedbackError::TargetUnreachable(target));
         }
 
-        // Depth-profile learner: always update from the query-time layered result.
-        if let Some(k) = ctx.hop_hint {
-            let width = ctx.params.max_depth + 1;
-            let answer = ctx.layered.per_depth.get(&target).cloned()
-                .unwrap_or_else(|| vec![0.0; width]);
-            let mut background = vec![0.0f32; width];
-            for prof in ctx.layered.per_depth.values() {
-                for (d, &x) in prof.iter().enumerate() {
-                    if d < width {
-                        background[d] += x;
+        // Depth-profile learner: gated off by default (measured dead end at 3 hops).
+        if self.engine_cfg.depth_profile_learning {
+            if let Some(k) = ctx.hop_hint {
+                let width = ctx.params.max_depth + 1;
+                let answer = ctx.layered.per_depth.get(&target).cloned()
+                    .unwrap_or_else(|| vec![0.0; width]);
+                let mut background = vec![0.0f32; width];
+                for prof in ctx.layered.per_depth.values() {
+                    for (d, &x) in prof.iter().enumerate() {
+                        if d < width {
+                            background[d] += x;
+                        }
                     }
                 }
-            }
-            let mut store = self.depth_profile.lock().unwrap();
-            store.record(k, &answer, &background, signal);
-            let n = store.config().rebuild_every_n;
-            if n > 0 && store.events_since_rebuild() >= n {
-                store.rebuild_marker(); // weights_for derives lazily on read; just reset the counter
+                let mut store = self.depth_profile.lock().unwrap();
+                store.record(k, &answer, &background, signal);
+                let n = store.config().rebuild_every_n;
+                if n > 0 && store.events_since_rebuild() >= n {
+                    store.rebuild_marker(); // weights_for derives lazily on read; just reset the counter
+                }
             }
         }
 
@@ -461,6 +469,7 @@ mod tests {
                 cache_capacity: 8,
                 cache_ttl: Duration::from_millis(1),
                 default_depth_weights: DepthWeights::uniform(4),
+                depth_profile_learning: false,
             },
         );
         let r = e.query(&[(0, 1.0)], Some(0), None, &params());
@@ -544,6 +553,7 @@ mod tests {
                 cache_capacity: 8,
                 cache_ttl: Duration::from_secs(3600),
                 default_depth_weights: DepthWeights::terminal(4, 2).unwrap(),
+                depth_profile_learning: false,
             },
         );
         // Caller passes None -> engine applies its terminal(2) default (max_depth 4 matches).
@@ -570,7 +580,15 @@ mod tests {
     fn query_with_hop_hint_uses_learned_soft_weights_after_feedback() {
         // Graph 0 -A-> 1 -B-> 2. hop_hint=2 with a cold DepthProfileStore behaves like
         // terminal(2): node 2 (depth 2) outranks node 1 (depth 1).
-        let e = engine(0); // 0 -A-> 1 -B-> 2, uniform prior
+        let ea = (1u32, EdgeProps { attenuation: 0.0, relation: 0, is_portal: false });
+        let eb = (2u32, EdgeProps { attenuation: 0.0, relation: 1, is_portal: false });
+        let g = Graph::from_adjacency(3, vec![vec![ea], vec![eb], vec![]], NodeProps::default()).unwrap();
+        let prior = RelationVocab::with_names_uniform(vec!["A".into(), "B".into()]);
+        let e = RgdbEngine::with_engine_config(
+            g, prior,
+            TransitionConfig { rebuild_every_n: 0, ..TransitionConfig::default() },
+            EngineConfig { depth_profile_learning: true, ..EngineConfig::default() },
+        );
         let p = PropagationParams { max_depth: 4, min_intensity: 0.0, depth_weights: None };
         let r = e.query(&[(0, 1.0)], Some(0), Some(2), &p);
         assert_eq!(r.ranked.first().map(|x| x.0), Some(2), "cold hop_hint=2 == terminal(2)");
@@ -596,5 +614,20 @@ mod tests {
         let r = e.query(&[(0, 1.0)], Some(0), None, &p);
         assert!(!r.ranked.is_empty());
         assert!(r.query_id > 0);
+    }
+
+    #[test]
+    fn hop_hint_default_does_not_drift_without_learning() {
+        // Default engine (depth_profile_learning = false): feedback must NOT move the
+        // hop_hint weights off terminal(k). Node 1 (depth 1) stays scored 0 under hop_hint=2.
+        let e = engine(0); // default config -> learning off
+        let p = PropagationParams { max_depth: 4, min_intensity: 0.0, depth_weights: None };
+        for _ in 0..40 {
+            let q = e.query(&[(0, 1.0)], Some(0), Some(2), &p);
+            let _ = e.record_feedback(q.query_id, 1, 1.0);
+        }
+        let after = e.query(&[(0, 1.0)], Some(0), Some(2), &p);
+        let n1 = after.ranked.iter().find(|x| x.0 == 1).map(|x| x.1).unwrap_or(0.0);
+        assert_eq!(n1, 0.0, "learning off: hop_hint=2 stays terminal(2), depth-1 node scores 0");
     }
 }
