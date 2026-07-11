@@ -15,6 +15,7 @@ use crate::depth_weights::DepthWeights;
 use crate::graph::{Graph, NodeId, RelationId};
 use crate::propagation::{propagate_layered, LayeredResult, PropagationParams};
 use crate::relation::RelationVocab;
+use crate::reranker::{Reranker, RerankerConfig};
 use crate::transitions::{TransitionConfig, TransitionError, TransitionStore};
 
 pub type QueryId = u64;
@@ -73,6 +74,7 @@ struct QueryContext {
     vocab: Arc<RelationVocab>,
     hop_hint: Option<usize>,
     layered: LayeredResult,
+    ranked_topk: Vec<(NodeId, f32)>,
     created: Instant,
 }
 
@@ -84,6 +86,7 @@ pub struct RgdbEngine {
     next_id: AtomicU64,
     engine_cfg: EngineConfig,
     depth_profile: Mutex<DepthProfileStore>,
+    reranker: Mutex<Reranker>,
 }
 
 impl RgdbEngine {
@@ -111,6 +114,7 @@ impl RgdbEngine {
 
     fn assemble(graph: Graph, store: TransitionStore, vocab: RelationVocab, engine_cfg: EngineConfig) -> Self {
         let cap = NonZeroUsize::new(engine_cfg.cache_capacity.max(1)).unwrap();
+        let n_relations = vocab.names().len();
         Self {
             graph,
             vocab: ArcSwap::from_pointee(vocab),
@@ -119,6 +123,7 @@ impl RgdbEngine {
             next_id: AtomicU64::new(1),
             engine_cfg,
             depth_profile: Mutex::new(DepthProfileStore::new(4, DepthProfileConfig::default())),
+            reranker: Mutex::new(Reranker::new(n_relations, 4, RerankerConfig::default())),
         }
     }
 
@@ -189,6 +194,19 @@ impl RgdbEngine {
             .collect();
         ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
+        let topk_n = self.reranker.lock().unwrap().config().top_k;
+        let ranked_topk: Vec<(NodeId, f32)> =
+            ranked.iter().take(topk_n).copied().collect();
+        {
+            let rr = self.reranker.lock().unwrap();
+            // Rerank only the top-K slice, leave the tail as-is.
+            let mut head: Vec<(NodeId, f32)> = ranked.iter().take(topk_n).copied().collect();
+            rr.rerank(&mut head, &layered, &self.graph);
+            for (i, item) in head.into_iter().enumerate() {
+                ranked[i] = item;
+            }
+        }
+
         let query_id = self.next_id.fetch_add(1, Ordering::Relaxed);
         self.cache.lock().unwrap().put(
             query_id,
@@ -199,6 +217,7 @@ impl RgdbEngine {
                 vocab,
                 hop_hint,
                 layered,
+                ranked_topk,
                 created: Instant::now(),
             },
         );
@@ -269,6 +288,13 @@ impl RgdbEngine {
                     store.rebuild_marker(); // weights_for derives lazily on read; just reset the counter
                 }
             }
+        }
+
+        // Reranker: always trains from feedback (not gated by depth_profile_learning),
+        // under the query-time top-K and layered result.
+        {
+            let mut rr = self.reranker.lock().unwrap();
+            rr.update(&ctx.ranked_topk, target, &ctx.layered, &self.graph, signal);
         }
 
         // Transition learner: credit under the query-time vocab + params. May be empty
@@ -629,5 +655,34 @@ mod tests {
         let after = e.query(&[(0, 1.0)], Some(0), Some(2), &p);
         let n1 = after.ranked.iter().find(|x| x.0 == 1).map(|x| x.1).unwrap_or(0.0);
         assert_eq!(n1, 0.0, "learning off: hop_hint=2 stays terminal(2), depth-1 node scores 0");
+    }
+
+    #[test]
+    fn reranker_is_identity_until_trained_then_reorders() {
+        // 0 -A-> 1, 0 -A-> 2, and 2 -A-> 3, 2 -A-> 4 (node 2 is a hub, out-degree 2;
+        // node 1 is a leaf, out-degree 0). Diffusion ranks node 2 and 1 similarly.
+        let a = |d| (d as u32, EdgeProps { attenuation: 0.0, relation: 0, is_portal: false });
+        let g = Graph::from_adjacency(
+            5, vec![vec![a(1), a(2)], vec![], vec![a(3), a(4)], vec![], vec![]],
+            NodeProps::default()).unwrap();
+        let prior = RelationVocab::with_names_uniform(vec!["A".into()]);
+        let e = RgdbEngine::new(g, prior, TransitionConfig { rebuild_every_n: 0, ..TransitionConfig::default() });
+        let p = PropagationParams { max_depth: 2, min_intensity: 0.0, depth_weights: None };
+
+        // Cold: reranker is identity, so ranking is whatever diffusion produced.
+        let r0 = e.query(&[(0, 1.0)], Some(0), None, &p);
+        let cold_top = r0.ranked.iter().find(|x| x.0 == 1 || x.0 == 2).map(|x| x.0);
+        assert!(cold_top.is_some());
+
+        // Train: node 1 (the leaf) is always correct.
+        for _ in 0..300 {
+            let q = e.query(&[(0, 1.0)], Some(0), None, &p);
+            let _ = e.record_feedback(q.query_id, 1, 1.0);
+        }
+        let after = e.query(&[(0, 1.0)], Some(0), None, &p);
+        // Among {1,2}, the trained reranker should now put node 1 (leaf) ahead of node 2 (hub).
+        let pos1 = after.ranked.iter().position(|x| x.0 == 1).unwrap();
+        let pos2 = after.ranked.iter().position(|x| x.0 == 2).unwrap();
+        assert!(pos1 < pos2, "trained reranker should rank the leaf answer above the hub");
     }
 }
