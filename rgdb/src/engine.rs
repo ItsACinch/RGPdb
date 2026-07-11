@@ -10,9 +10,10 @@ use lru::LruCache;
 use thiserror::Error;
 
 use crate::credit::credit;
+use crate::depth_profile::{DepthProfileConfig, DepthProfileStore};
 use crate::depth_weights::DepthWeights;
 use crate::graph::{Graph, NodeId, RelationId};
-use crate::propagation::{propagate, PropagationParams};
+use crate::propagation::{propagate_layered, LayeredResult, PropagationParams};
 use crate::relation::RelationVocab;
 use crate::transitions::{TransitionConfig, TransitionError, TransitionStore};
 
@@ -64,6 +65,8 @@ struct QueryContext {
     query_relation: Option<RelationId>,
     params: PropagationParams,
     vocab: Arc<RelationVocab>,
+    hop_hint: Option<usize>,
+    layered: LayeredResult,
     created: Instant,
 }
 
@@ -74,6 +77,7 @@ pub struct RgdbEngine {
     cache: Mutex<LruCache<QueryId, QueryContext>>,
     next_id: AtomicU64,
     engine_cfg: EngineConfig,
+    depth_profile: Mutex<DepthProfileStore>,
 }
 
 impl RgdbEngine {
@@ -108,6 +112,7 @@ impl RgdbEngine {
             cache: Mutex::new(LruCache::new(cap)),
             next_id: AtomicU64::new(1),
             engine_cfg,
+            depth_profile: Mutex::new(DepthProfileStore::new(4, DepthProfileConfig::default())),
         }
     }
 
@@ -138,12 +143,20 @@ impl RgdbEngine {
         &self,
         seeds: &[(NodeId, f32)],
         query_relation: Option<RelationId>,
+        hop_hint: Option<usize>,
         params: &PropagationParams,
     ) -> QueryResult {
-        // Caller's weights win; else apply the config default when its length fits
-        // this query's max_depth; else leave uniform.
+        // Resolve depth weights: caller override wins; else learned soft weights for the
+        // hop hint (when its length fits); else the config default; else uniform.
         let resolved = if params.depth_weights.is_some() {
             params.clone()
+        } else if let Some(k) = hop_hint {
+            let w = self.depth_profile.lock().unwrap().weights_for(k);
+            if w.as_slice().len() == params.max_depth + 1 {
+                PropagationParams { depth_weights: Some(w), ..params.clone() }
+            } else {
+                params.clone()
+            }
         } else if self.engine_cfg.default_depth_weights.as_slice().len() == params.max_depth + 1 {
             PropagationParams {
                 depth_weights: Some(self.engine_cfg.default_depth_weights.clone()),
@@ -154,8 +167,20 @@ impl RgdbEngine {
         };
 
         let vocab = self.vocab.load_full();
-        let totals = propagate(&self.graph, &vocab, seeds, query_relation, &resolved);
-        let mut ranked: Vec<(NodeId, f32)> = totals.into_iter().collect();
+        let layered = propagate_layered(&self.graph, &vocab, seeds, query_relation, &resolved);
+        let c = resolved.depth_weights.clone();
+        // Collapse layered -> scalar score with the resolved weights (uniform if None).
+        let mut ranked: Vec<(NodeId, f32)> = layered
+            .per_depth
+            .iter()
+            .map(|(&node, prof)| {
+                let s = match &c {
+                    Some(w) => prof.iter().zip(w.as_slice()).map(|(x, ww)| x * ww).sum(),
+                    None => prof.iter().sum(),
+                };
+                (node, s)
+            })
+            .collect();
         ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
         let query_id = self.next_id.fetch_add(1, Ordering::Relaxed);
@@ -166,6 +191,8 @@ impl RgdbEngine {
                 query_relation,
                 params: resolved,
                 vocab,
+                hop_hint,
+                layered,
                 created: Instant::now(),
             },
         );
@@ -201,7 +228,44 @@ impl RgdbEngine {
             return Err(FeedbackError::InvalidTarget(target));
         }
 
-        // Credit under the vocab that produced the ranking, not the live one.
+        // Reachability is decided by the layered result (did the target receive any
+        // mass?), NOT by transition-credit emptiness: under a narrow depth_weights the
+        // transition credit can be empty for a target that is still reachable at another
+        // depth, and the depth-profile learner must still see that signal.
+        let reachable = ctx
+            .layered
+            .per_depth
+            .get(&target)
+            .map(|p| p.iter().any(|&x| x > 0.0))
+            .unwrap_or(false);
+        if !reachable {
+            return Err(FeedbackError::TargetUnreachable(target));
+        }
+
+        // Depth-profile learner: always update from the query-time layered result.
+        if let Some(k) = ctx.hop_hint {
+            let width = ctx.params.max_depth + 1;
+            let answer = ctx.layered.per_depth.get(&target).cloned()
+                .unwrap_or_else(|| vec![0.0; width]);
+            let mut background = vec![0.0f32; width];
+            for prof in ctx.layered.per_depth.values() {
+                for (d, &x) in prof.iter().enumerate() {
+                    if d < width {
+                        background[d] += x;
+                    }
+                }
+            }
+            let mut store = self.depth_profile.lock().unwrap();
+            store.record(k, &answer, &background, signal);
+            let n = store.config().rebuild_every_n;
+            if n > 0 && store.events_since_rebuild() >= n {
+                store.rebuild_marker(); // weights_for derives lazily on read; just reset the counter
+            }
+        }
+
+        // Transition learner: credit under the query-time vocab + params. May be empty
+        // under a narrow depth_weights — recording only when there is credit preserves
+        // the pre-feature transition-event behavior exactly.
         let credits = credit(
             &self.graph,
             &ctx.vocab,
@@ -210,28 +274,27 @@ impl RgdbEngine {
             target,
             &ctx.params,
         );
-        if credits.is_empty() {
-            return Err(FeedbackError::TargetUnreachable(target));
-        }
-
-        // Record and (if the threshold is crossed) rebuild inside ONE critical
-        // section. Splitting them lets two concurrent feedback events each observe
-        // `>= rebuild_every_n` and both call rebuild(), applying decay twice for a
-        // single threshold crossing.
-        let new_vocab = {
-            let mut store = self.store.lock().unwrap();
-            store.record(&credits, signal);
-            let n = store.config().rebuild_every_n;
-            if n > 0 && store.events_since_rebuild() >= n {
-                Some(store.rebuild())
-            } else {
-                None
+        if !credits.is_empty() {
+            let new_vocab = {
+                let mut store = self.store.lock().unwrap();
+                store.record(&credits, signal);
+                let n = store.config().rebuild_every_n;
+                if n > 0 && store.events_since_rebuild() >= n {
+                    Some(store.rebuild())
+                } else {
+                    None
+                }
+            };
+            if let Some(vocab) = new_vocab {
+                self.vocab.store(Arc::new(vocab));
             }
-        };
-        if let Some(vocab) = new_vocab {
-            self.vocab.store(Arc::new(vocab));
         }
         Ok(())
+    }
+
+    /// Reset the depth-profile event counter (weights are derived lazily on read).
+    pub fn refresh_profiles(&self) {
+        self.depth_profile.lock().unwrap().rebuild_marker();
     }
 
     /// Rebuild the similarity matrix from counts and atomically swap it in.
@@ -278,7 +341,7 @@ mod tests {
     #[test]
     fn query_returns_ranked_results_and_an_id() {
         let e = engine(0);
-        let r = e.query(&[(0, 1.0)], Some(0), &params());
+        let r = e.query(&[(0, 1.0)], Some(0), None, &params());
         assert!(r.query_id > 0);
         assert!(!r.ranked.is_empty());
         // sorted descending by score
@@ -296,7 +359,7 @@ mod tests {
     #[test]
     fn feedback_on_out_of_bounds_target_errors() {
         let e = engine(0);
-        let r = e.query(&[(0, 1.0)], Some(0), &params());
+        let r = e.query(&[(0, 1.0)], Some(0), None, &params());
         assert!(matches!(e.record_feedback(r.query_id, 99, 1.0), Err(FeedbackError::InvalidTarget(_))));
     }
 
@@ -304,7 +367,7 @@ mod tests {
     fn feedback_on_unreachable_target_errors() {
         // seed at node 2 (a sink): nothing is reachable
         let e = engine(0);
-        let r = e.query(&[(2, 1.0)], Some(0), &params());
+        let r = e.query(&[(2, 1.0)], Some(0), None, &params());
         assert!(matches!(e.record_feedback(r.query_id, 0, 1.0), Err(FeedbackError::TargetUnreachable(_))));
     }
 
@@ -334,7 +397,7 @@ mod tests {
         assert_eq!(e.vocab().similarity(0, 2), 1.0);
 
         let p = PropagationParams { max_depth: 2, min_intensity: 0.0, depth_weights: None };
-        let r = e.query(&[(0, 1.0)], Some(0), &p);
+        let r = e.query(&[(0, 1.0)], Some(0), None, &p);
         e.record_feedback(r.query_id, 2, 100.0).unwrap();
 
         // Recorded, but not rebuilt yet: the live matrix must not have moved.
@@ -362,7 +425,7 @@ mod tests {
     #[test]
     fn auto_refresh_fires_at_rebuild_every_n() {
         let e = engine(1); // refresh after every event
-        let r = e.query(&[(0, 1.0)], Some(0), &params());
+        let r = e.query(&[(0, 1.0)], Some(0), None, &params());
         e.record_feedback(r.query_id, 2, 100.0).unwrap();
         assert_eq!(e.events_since_rebuild(), 0, "auto-refresh reset the counter");
     }
@@ -370,7 +433,7 @@ mod tests {
     #[test]
     fn save_load_roundtrip_preserves_learning() {
         let e = engine(0);
-        let r = e.query(&[(0, 1.0)], Some(0), &params());
+        let r = e.query(&[(0, 1.0)], Some(0), None, &params());
         e.record_feedback(r.query_id, 2, 100.0).unwrap();
         let path = "test_engine_roundtrip.transitions";
         e.save(path).unwrap();
@@ -400,7 +463,7 @@ mod tests {
                 default_depth_weights: DepthWeights::uniform(4),
             },
         );
-        let r = e.query(&[(0, 1.0)], Some(0), &params());
+        let r = e.query(&[(0, 1.0)], Some(0), None, &params());
         std::thread::sleep(Duration::from_millis(10));
 
         // Expired: must error, never silently use the stale context.
@@ -442,11 +505,11 @@ mod tests {
         let p = PropagationParams { max_depth: 2, min_intensity: 0.0, depth_weights: None };
 
         // 1) Issue the query first: it captures the uniform vocab.
-        let q1 = e.query(&[(0, 1.0)], Some(0), &p);
+        let q1 = e.query(&[(0, 1.0)], Some(0), None, &p);
 
         // 2) Sharpen the LIVE matrix to punish A->C, by crediting target 4 (reachable
         //    only via A then B) and rebuilding.
-        let q2 = e.query(&[(0, 1.0)], Some(0), &p);
+        let q2 = e.query(&[(0, 1.0)], Some(0), None, &p);
         e.record_feedback(q2.query_id, 4, 1000.0).unwrap();
         e.refresh();
         assert!(e.vocab().similarity(0, 2) < 0.2, "live matrix should now punish A->C");
@@ -485,7 +548,7 @@ mod tests {
         );
         // Caller passes None -> engine applies its terminal(2) default (max_depth 4 matches).
         let p = PropagationParams { max_depth: 4, min_intensity: 0.0, depth_weights: None };
-        let r = e.query(&[(0, 1.0)], Some(0), &p);
+        let r = e.query(&[(0, 1.0)], Some(0), None, &p);
         assert_eq!(r.ranked.first().map(|x| x.0), Some(2), "terminal(2) default ranks node 2 first");
     }
 
@@ -499,7 +562,39 @@ mod tests {
             min_intensity: 0.0,
             depth_weights: Some(DepthWeights::terminal(4, 1).unwrap()),
         };
-        let r = e.query(&[(0, 1.0)], Some(0), &p);
+        let r = e.query(&[(0, 1.0)], Some(0), None, &p);
         assert_eq!(r.ranked.first().map(|x| x.0), Some(1), "caller terminal(1) ranks node 1 first");
+    }
+
+    #[test]
+    fn query_with_hop_hint_uses_learned_soft_weights_after_feedback() {
+        // Graph 0 -A-> 1 -B-> 2. hop_hint=2 with a cold DepthProfileStore behaves like
+        // terminal(2): node 2 (depth 2) outranks node 1 (depth 1).
+        let e = engine(0); // 0 -A-> 1 -B-> 2, uniform prior
+        let p = PropagationParams { max_depth: 4, min_intensity: 0.0, depth_weights: None };
+        let r = e.query(&[(0, 1.0)], Some(0), Some(2), &p);
+        assert_eq!(r.ranked.first().map(|x| x.0), Some(2), "cold hop_hint=2 == terminal(2)");
+
+        // Feed back that node 1 (a depth-1 answer) is correct, repeatedly, then refresh
+        // the profile. The learned weight at depth 1 rises, so node 1 can now score.
+        for _ in 0..40 {
+            let q = e.query(&[(0, 1.0)], Some(0), Some(2), &p);
+            let _ = e.record_feedback(q.query_id, 1, 1.0);
+        }
+        e.refresh_profiles();
+        let after = e.query(&[(0, 1.0)], Some(0), Some(2), &p);
+        // depth-1 mass is now weighted, so node 1's score is nonzero (was 0 under terminal(2)).
+        let n1 = after.ranked.iter().find(|x| x.0 == 1).map(|x| x.1).unwrap_or(0.0);
+        assert!(n1 > 0.0, "learned soft weights should score the depth-1 node, got {n1}");
+    }
+
+    #[test]
+    fn query_without_hop_hint_is_unchanged() {
+        // hop_hint = None must reproduce the pre-feature behavior (config default path).
+        let e = engine(0);
+        let p = PropagationParams { max_depth: 4, min_intensity: 0.0, depth_weights: None };
+        let r = e.query(&[(0, 1.0)], Some(0), None, &p);
+        assert!(!r.ranked.is_empty());
+        assert!(r.query_id > 0);
     }
 }
