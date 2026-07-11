@@ -643,7 +643,6 @@ Add to the `tests` module in `rgdb/src/engine.rs`:
 ```rust
     #[test]
     fn query_with_hop_hint_uses_learned_soft_weights_after_feedback() {
-        use crate::depth_weights::DepthWeights;
         // Graph 0 -A-> 1 -B-> 2. hop_hint=2 with a cold DepthProfileStore behaves like
         // terminal(2): node 2 (depth 2) outranks node 1 (depth 1).
         let e = engine(0); // 0 -A-> 1 -B-> 2, uniform prior
@@ -772,9 +771,34 @@ Rewrite `query` to take `hop_hint`, resolve soft weights, run the layered pass, 
     }
 ```
 
-In `record_feedback`, after the existing transition credit block, add the depth-profile update (target's per-depth profile vs background), inside the SAME critical-section discipline. Insert before the `Ok(())`:
+**Rewrite `record_feedback` (do NOT keep the old `credits.is_empty() -> TargetUnreachable`
+early return).** The reason: `credit()` consumes `ctx.params.depth_weights`, and once
+`hop_hint` narrows those weights to `terminal(k)`, `credit()` legitimately returns empty
+for a target reachable at a DIFFERENT depth — which must NOT block the depth-profile
+learner (it only reads `ctx.layered`). So decide reachability from the layered result, run
+the depth-profile update whenever reachable, and touch the transition store only when there
+is credit to record. Replace the body from the `InvalidTarget` check through `Ok(())` with:
+
 ```rust
-        // Update the depth profile from the query-time layered result.
+        if (target as usize) >= self.graph.num_nodes() {
+            return Err(FeedbackError::InvalidTarget(target));
+        }
+
+        // Reachability is decided by the layered result (did the target receive any
+        // mass?), NOT by transition-credit emptiness: under a narrow depth_weights the
+        // transition credit can be empty for a target that is still reachable at another
+        // depth, and the depth-profile learner must still see that signal.
+        let reachable = ctx
+            .layered
+            .per_depth
+            .get(&target)
+            .map(|p| p.iter().any(|&x| x > 0.0))
+            .unwrap_or(false);
+        if !reachable {
+            return Err(FeedbackError::TargetUnreachable(target));
+        }
+
+        // Depth-profile learner: always update from the query-time layered result.
         if let Some(k) = ctx.hop_hint {
             let width = ctx.params.max_depth + 1;
             let answer = ctx.layered.per_depth.get(&target).cloned()
@@ -791,10 +815,43 @@ In `record_feedback`, after the existing transition credit block, add the depth-
             store.record(k, &answer, &background, signal);
             let n = store.config().rebuild_every_n;
             if n > 0 && store.events_since_rebuild() >= n {
-                store.rebuild_marker(); // weights_for derives on read, so just reset the counter
+                store.rebuild_marker(); // weights_for derives lazily on read; just reset the counter
             }
         }
+
+        // Transition learner: credit under the query-time vocab + params. May be empty
+        // under a narrow depth_weights — recording only when there is credit preserves
+        // the pre-feature transition-event behavior exactly.
+        let credits = credit(
+            &self.graph,
+            &ctx.vocab,
+            &ctx.seeds,
+            ctx.query_relation,
+            target,
+            &ctx.params,
+        );
+        if !credits.is_empty() {
+            let new_vocab = {
+                let mut store = self.store.lock().unwrap();
+                store.record(&credits, signal);
+                let n = store.config().rebuild_every_n;
+                if n > 0 && store.events_since_rebuild() >= n {
+                    Some(store.rebuild())
+                } else {
+                    None
+                }
+            };
+            if let Some(vocab) = new_vocab {
+                self.vocab.store(Arc::new(vocab));
+            }
+        }
+        Ok(())
 ```
+
+This preserves every existing test: a reachable target with non-empty credit records
+transitions exactly as before; an unreachable target (no layered mass) still returns
+`TargetUnreachable`. Only the new `hop_hint` path changes — a reachable target whose
+credit is empty under narrow weights now trains the depth profile and returns `Ok`.
 (Remove the placeholder `w` lines — they are only shown to flag: do not shadow anything; use `ctx.params.max_depth`.)
 
 Add a manual refresh hook mirroring `refresh`:
