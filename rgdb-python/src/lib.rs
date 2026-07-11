@@ -96,6 +96,7 @@ fn propagate(
         max_depth,
         min_intensity,
         depth_weights: to_depth_weights(depth_weights, max_depth)?,
+        schedule: None,
     };
     let totals = rust_propagate(&graph.inner, &vocab.inner, &seeds, query_relation, &params);
     Ok(totals.into_iter().collect())
@@ -111,7 +112,7 @@ fn propagate_layered(
     max_depth: usize,
     min_intensity: f32,
 ) -> (Vec<(u32, Vec<f32>)>, Vec<(u32, u16)>) {
-    let params = PropagationParams { max_depth, min_intensity, depth_weights: None };
+    let params = PropagationParams { max_depth, min_intensity, depth_weights: None, schedule: None };
     let r = rust_propagate_layered(&graph.inner, &vocab.inner, &seeds, query_relation, &params);
     let per_depth = r.per_depth.into_iter().collect();
     let dominant = r.dominant_incoming.into_iter().collect();
@@ -151,6 +152,7 @@ impl PyEngine {
             max_depth,
             min_intensity,
             depth_weights: to_depth_weights(depth_weights, max_depth)?,
+            schedule: None,
         };
         let r = self.inner.query(&seeds, query_relation, hop_hint, &params);
         Ok((r.ranked, r.query_id))

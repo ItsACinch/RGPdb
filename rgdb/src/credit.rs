@@ -149,6 +149,9 @@ fn ball_of(f: &[HashMap<State, f32>]) -> Vec<State> {
 /// L1-normalized credit per `(r_in, r_out)` transition for a rewarded `target`.
 /// Empty when the target is unreachable within `max_depth`.
 ///
+/// NOTE: `params.schedule` is ignored here (transition credit is a global-matrix
+/// concern). The forward/backward invariant holds only when `schedule == None`.
+///
 /// # Pruning bias (production)
 ///
 /// The forward pass prunes states below `params.min_intensity`; the backward DP
@@ -248,6 +251,9 @@ pub fn credit(
 /// Diagnostic: `Σ_seeds seed_mass · Σ_L depth_weights[L] · B_exact[L][(seed, query_relation)]`.
 /// Equals `propagate(..., params)[target]` exactly when `params.min_intensity == 0.0`.
 /// At `depth_weights = None` (uniform) this reduces to the at-most-`max_depth` mass.
+///
+/// NOTE: `params.schedule` is ignored here (transition credit is a global-matrix
+/// concern). The forward/backward invariant holds only when `schedule == None`.
 pub fn backward_mass_at_target(
     graph: &Graph,
     vocab: &RelationVocab,
@@ -291,7 +297,7 @@ mod tests {
 
     fn exact() -> PropagationParams {
         // The forward/backward invariant is exact only without pruning.
-        PropagationParams { max_depth: 4, min_intensity: 0.0, depth_weights: None }
+        PropagationParams { max_depth: 4, min_intensity: 0.0, depth_weights: None, schedule: None }
     }
 
     fn chain() -> Graph {
@@ -401,7 +407,7 @@ mod tests {
         let e = |dst| (dst, EdgeProps { attenuation: 0.0, relation: 0, is_portal: false });
         let g = Graph::from_adjacency(2, vec![vec![e(1)], vec![e(1)]], NodeProps::default()).unwrap();
         let v = RelationVocab::uniform(1);
-        let p = PropagationParams { max_depth: 2, min_intensity: 0.0, depth_weights: None };
+        let p = PropagationParams { max_depth: 2, min_intensity: 0.0, depth_weights: None, schedule: None };
         let fwd = *propagate(&g, &v, &[(0, 1.0)], Some(0), &p).get(&1).unwrap();
         let bwd = backward_mass_at_target(&g, &v, &[(0, 1.0)], Some(0), 1, &p);
         assert!((fwd - 1.5725).abs() < 1e-5, "forward drifted: {fwd}");
@@ -416,7 +422,7 @@ mod tests {
         let eb = (2u32, EdgeProps { attenuation: 0.0, relation: 1, is_portal: false });
         let g = Graph::from_adjacency(3, vec![vec![ea], vec![eb], vec![]], NodeProps::default()).unwrap();
         let v = RelationVocab::uniform(2);
-        let p = PropagationParams { max_depth: 2, min_intensity: 0.0, depth_weights: None };
+        let p = PropagationParams { max_depth: 2, min_intensity: 0.0, depth_weights: None, schedule: None };
         let c = credit(&g, &v, &[(0, 1.0)], None, 2, &p);
         assert_eq!(c.len(), 1, "only the typed second hop is credited");
         assert_eq!((c[0].0, c[0].1), (0, 1));
@@ -430,7 +436,7 @@ mod tests {
         let e2 = (2u32, EdgeProps { attenuation: 0.5, relation: 0, is_portal: false });
         let g = Graph::from_adjacency(3, vec![vec![e1, e2], vec![], vec![]], NodeProps::default()).unwrap();
         let v = RelationVocab::uniform(1);
-        let p = PropagationParams { max_depth: 1, min_intensity: 0.0, depth_weights: None };
+        let p = PropagationParams { max_depth: 1, min_intensity: 0.0, depth_weights: None, schedule: None };
         let fwd = *propagate(&g, &v, &[(0, 1.0)], Some(0), &p).get(&1).unwrap();
         let bwd = backward_mass_at_target(&g, &v, &[(0, 1.0)], Some(0), 1, &p);
         let expected = 0.85f32 * (1.0 / 1.5); // reflection * p(0->1)
@@ -467,7 +473,7 @@ mod tests {
     }
 
     fn params_with(c: Option<crate::depth_weights::DepthWeights>) -> PropagationParams {
-        PropagationParams { max_depth: 2, min_intensity: 0.0, depth_weights: c }
+        PropagationParams { max_depth: 2, min_intensity: 0.0, depth_weights: c, schedule: None }
     }
 
     #[test]

@@ -366,7 +366,7 @@ mod tests {
         RgdbEngine::new(g, prior, cfg)
     }
 
-    fn params() -> PropagationParams { PropagationParams { max_depth: 4, min_intensity: 0.0, depth_weights: None } }
+    fn params() -> PropagationParams { PropagationParams { max_depth: 4, min_intensity: 0.0, depth_weights: None, schedule: None } }
 
     #[test]
     fn cold_start_matrix_is_uniform() {
@@ -436,7 +436,7 @@ mod tests {
         assert_eq!(e.vocab().similarity(0, 1), 1.0);
         assert_eq!(e.vocab().similarity(0, 2), 1.0);
 
-        let p = PropagationParams { max_depth: 2, min_intensity: 0.0, depth_weights: None };
+        let p = PropagationParams { max_depth: 2, min_intensity: 0.0, depth_weights: None, schedule: None };
         let r = e.query(&[(0, 1.0)], Some(0), None, &p);
         e.record_feedback(r.query_id, 2, 100.0).unwrap();
 
@@ -544,7 +544,7 @@ mod tests {
             prior,
             TransitionConfig { rebuild_every_n: 0, ..TransitionConfig::default() },
         );
-        let p = PropagationParams { max_depth: 2, min_intensity: 0.0, depth_weights: None };
+        let p = PropagationParams { max_depth: 2, min_intensity: 0.0, depth_weights: None, schedule: None };
 
         // 1) Issue the query first: it captures the uniform vocab.
         let q1 = e.query(&[(0, 1.0)], Some(0), None, &p);
@@ -591,7 +591,7 @@ mod tests {
             },
         );
         // Caller passes None -> engine applies its terminal(2) default (max_depth 4 matches).
-        let p = PropagationParams { max_depth: 4, min_intensity: 0.0, depth_weights: None };
+        let p = PropagationParams { max_depth: 4, min_intensity: 0.0, depth_weights: None, schedule: None };
         let r = e.query(&[(0, 1.0)], Some(0), None, &p);
         assert_eq!(r.ranked.first().map(|x| x.0), Some(2), "terminal(2) default ranks node 2 first");
     }
@@ -605,6 +605,7 @@ mod tests {
             max_depth: 4,
             min_intensity: 0.0,
             depth_weights: Some(DepthWeights::terminal(4, 1).unwrap()),
+            schedule: None,
         };
         let r = e.query(&[(0, 1.0)], Some(0), None, &p);
         assert_eq!(r.ranked.first().map(|x| x.0), Some(1), "caller terminal(1) ranks node 1 first");
@@ -623,7 +624,7 @@ mod tests {
             TransitionConfig { rebuild_every_n: 0, ..TransitionConfig::default() },
             EngineConfig { depth_profile_learning: true, ..EngineConfig::default() },
         );
-        let p = PropagationParams { max_depth: 4, min_intensity: 0.0, depth_weights: None };
+        let p = PropagationParams { max_depth: 4, min_intensity: 0.0, depth_weights: None, schedule: None };
         let r = e.query(&[(0, 1.0)], Some(0), Some(2), &p);
         assert_eq!(r.ranked.first().map(|x| x.0), Some(2), "cold hop_hint=2 == terminal(2)");
 
@@ -644,7 +645,7 @@ mod tests {
     fn query_without_hop_hint_is_unchanged() {
         // hop_hint = None must reproduce the pre-feature behavior (config default path).
         let e = engine(0);
-        let p = PropagationParams { max_depth: 4, min_intensity: 0.0, depth_weights: None };
+        let p = PropagationParams { max_depth: 4, min_intensity: 0.0, depth_weights: None, schedule: None };
         let r = e.query(&[(0, 1.0)], Some(0), None, &p);
         assert!(!r.ranked.is_empty());
         assert!(r.query_id > 0);
@@ -655,7 +656,7 @@ mod tests {
         // Default engine (depth_profile_learning = false): feedback must NOT move the
         // hop_hint weights off terminal(k). Node 1 (depth 1) stays scored 0 under hop_hint=2.
         let e = engine(0); // default config -> learning off
-        let p = PropagationParams { max_depth: 4, min_intensity: 0.0, depth_weights: None };
+        let p = PropagationParams { max_depth: 4, min_intensity: 0.0, depth_weights: None, schedule: None };
         for _ in 0..40 {
             let q = e.query(&[(0, 1.0)], Some(0), Some(2), &p);
             let _ = e.record_feedback(q.query_id, 1, 1.0);
@@ -680,7 +681,7 @@ mod tests {
             TransitionConfig { rebuild_every_n: 0, ..TransitionConfig::default() },
             EngineConfig { reranker_enabled: true, ..EngineConfig::default() },
         );
-        let p = PropagationParams { max_depth: 2, min_intensity: 0.0, depth_weights: None };
+        let p = PropagationParams { max_depth: 2, min_intensity: 0.0, depth_weights: None, schedule: None };
 
         // Cold: reranker is identity, so ranking is whatever diffusion produced.
         let r0 = e.query(&[(0, 1.0)], Some(0), None, &p);
@@ -711,7 +712,7 @@ mod tests {
             NodeProps::default()).unwrap();
         let prior = RelationVocab::with_names_uniform(vec!["A".into()]);
         let e = RgdbEngine::new(g, prior, TransitionConfig { rebuild_every_n: 0, ..TransitionConfig::default() });
-        let p = PropagationParams { max_depth: 2, min_intensity: 0.0, depth_weights: None };
+        let p = PropagationParams { max_depth: 2, min_intensity: 0.0, depth_weights: None, schedule: None };
 
         let cold = e.query(&[(0, 1.0)], Some(0), None, &p);
         let cold_ranked = cold.ranked.clone();
