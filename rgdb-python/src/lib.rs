@@ -3,7 +3,7 @@
 use pyo3::prelude::*;
 use rgdb::graph::{Graph, NodeProps, EdgeProps, NodeId, RelationId};
 use rgdb::relation::RelationVocab;
-use rgdb::propagation::{propagate as rust_propagate, PropagationParams};
+use rgdb::propagation::{propagate as rust_propagate, propagate_layered as rust_propagate_layered, PropagationParams};
 use rgdb::engine::{RgdbEngine, QueryId};
 use rgdb::transitions::TransitionConfig;
 use rgdb::depth_weights::DepthWeights;
@@ -101,6 +101,23 @@ fn propagate(
     Ok(totals.into_iter().collect())
 }
 
+#[pyfunction]
+#[pyo3(signature = (graph, vocab, seeds, query_relation=None, max_depth=4, min_intensity=1e-3))]
+fn propagate_layered(
+    graph: &PyGraph,
+    vocab: &PyVocab,
+    seeds: Vec<(u32, f32)>,
+    query_relation: Option<u16>,
+    max_depth: usize,
+    min_intensity: f32,
+) -> (Vec<(u32, Vec<f32>)>, Vec<(u32, u16)>) {
+    let params = PropagationParams { max_depth, min_intensity, depth_weights: None };
+    let r = rust_propagate_layered(&graph.inner, &vocab.inner, &seeds, query_relation, &params);
+    let per_depth = r.per_depth.into_iter().collect();
+    let dominant = r.dominant_incoming.into_iter().collect();
+    (per_depth, dominant)
+}
+
 #[pyclass(name = "Engine")]
 struct PyEngine { inner: RgdbEngine }
 
@@ -164,5 +181,6 @@ fn _rgdb_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(uniform_vocab, m)?)?;
     m.add_function(wrap_pyfunction!(vocab_from_matrix, m)?)?;
     m.add_function(wrap_pyfunction!(propagate, m)?)?;
+    m.add_function(wrap_pyfunction!(propagate_layered, m)?)?;
     Ok(())
 }
