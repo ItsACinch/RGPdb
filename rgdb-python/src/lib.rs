@@ -82,7 +82,7 @@ fn to_depth_weights(
 }
 
 #[pyfunction]
-#[pyo3(signature = (graph, vocab, seeds, query_relation=None, max_depth=4, min_intensity=1e-3, depth_weights=None))]
+#[pyo3(signature = (graph, vocab, seeds, query_relation=None, max_depth=4, min_intensity=1e-3, depth_weights=None, schedule=None))]
 fn propagate(
     graph: &PyGraph,
     vocab: &PyVocab,
@@ -91,19 +91,20 @@ fn propagate(
     max_depth: usize,
     min_intensity: f32,
     depth_weights: Option<Vec<f32>>,
+    schedule: Option<Vec<u16>>,
 ) -> PyResult<Vec<(u32, f32)>> {
     let params = PropagationParams {
         max_depth,
         min_intensity,
         depth_weights: to_depth_weights(depth_weights, max_depth)?,
-        schedule: None,
+        schedule,
     };
     let totals = rust_propagate(&graph.inner, &vocab.inner, &seeds, query_relation, &params);
     Ok(totals.into_iter().collect())
 }
 
 #[pyfunction]
-#[pyo3(signature = (graph, vocab, seeds, query_relation=None, max_depth=4, min_intensity=1e-3))]
+#[pyo3(signature = (graph, vocab, seeds, query_relation=None, max_depth=4, min_intensity=1e-3, schedule=None))]
 fn propagate_layered(
     graph: &PyGraph,
     vocab: &PyVocab,
@@ -111,8 +112,9 @@ fn propagate_layered(
     query_relation: Option<u16>,
     max_depth: usize,
     min_intensity: f32,
+    schedule: Option<Vec<u16>>,
 ) -> (Vec<(u32, Vec<f32>)>, Vec<(u32, u16)>) {
-    let params = PropagationParams { max_depth, min_intensity, depth_weights: None, schedule: None };
+    let params = PropagationParams { max_depth, min_intensity, depth_weights: None, schedule };
     let r = rust_propagate_layered(&graph.inner, &vocab.inner, &seeds, query_relation, &params);
     let per_depth = r.per_depth.into_iter().collect();
     let dominant = r.dominant_incoming.into_iter().collect();
@@ -138,7 +140,7 @@ impl PyEngine {
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("{e}")))
     }
 
-    #[pyo3(signature = (seeds, query_relation=None, max_depth=4, min_intensity=1e-3, depth_weights=None, hop_hint=None))]
+    #[pyo3(signature = (seeds, query_relation=None, max_depth=4, min_intensity=1e-3, depth_weights=None, hop_hint=None, schedule=None))]
     fn query(
         &self,
         seeds: Vec<(u32, f32)>,
@@ -147,12 +149,13 @@ impl PyEngine {
         min_intensity: f32,
         depth_weights: Option<Vec<f32>>,
         hop_hint: Option<usize>,
+        schedule: Option<Vec<u16>>,
     ) -> PyResult<(Vec<(u32, f32)>, u64)> {
         let params = PropagationParams {
             max_depth,
             min_intensity,
             depth_weights: to_depth_weights(depth_weights, max_depth)?,
-            schedule: None,
+            schedule,
         };
         let r = self.inner.query(&seeds, query_relation, hop_hint, &params);
         Ok((r.ranked, r.query_id))
