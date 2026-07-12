@@ -4,7 +4,7 @@
 
 use thiserror::Error;
 
-use crate::graph::{Graph, NodeId};
+use crate::graph::{Graph, NodeId, RelationId};
 use crate::propagation::LayeredResult;
 
 #[derive(Debug, Error)]
@@ -45,13 +45,15 @@ fn sigmoid(x: f32) -> f32 {
 impl Reranker {
     pub fn new(n_relations: usize, max_depth: usize, cfg: RerankerConfig) -> Self {
         // features: (max_depth+1) depth profile + log(score) + log(degree) + n_relations one-hot
-        let dim = (max_depth + 1) + 2 + n_relations;
+        // + 1 query-conditioned match feature
+        let dim = (max_depth + 1) + 2 + n_relations + 1;
         Self { n_relations, max_depth, dim, w: vec![0.0; dim], b: 0.0, cfg }
     }
 
     pub fn config(&self) -> RerankerConfig { self.cfg }
 
-    pub fn features(&self, node: NodeId, layered: &LayeredResult, graph: &Graph) -> Vec<f32> {
+    pub fn features(&self, node: NodeId, layered: &LayeredResult, graph: &Graph,
+                    expected_relation: Option<RelationId>) -> Vec<f32> {
         let mut f = vec![0.0f32; self.dim];
         let mut i = 0;
         // depth profile (raw; small magnitudes so no standardization needed for a demo)
@@ -78,6 +80,13 @@ impl Reranker {
                 f[i + ri] = 1.0;
             }
         }
+        // query-conditioned match feature (LAST slot): does this node's dominant incoming
+        // relation equal the query's expected final relation? 0.0 when there is no schedule.
+        if let Some(er) = expected_relation {
+            if layered.dominant_incoming.get(&node) == Some(&er) {
+                f[self.dim - 1] = 1.0;
+            }
+        }
         f
     }
 
@@ -85,12 +94,13 @@ impl Reranker {
         self.b + self.w.iter().zip(feats).map(|(w, x)| w * x).sum::<f32>()
     }
 
-    pub fn rerank(&self, candidates: &mut Vec<(NodeId, f32)>, layered: &LayeredResult, graph: &Graph) {
+    pub fn rerank(&self, candidates: &mut Vec<(NodeId, f32)>, layered: &LayeredResult,
+                  graph: &Graph, expected_relation: Option<RelationId>) {
         // Stable sort by learned score DESC; with w=0,b=0 every key is 0 so order is preserved.
         let scored: Vec<(usize, f32)> = candidates
             .iter()
             .enumerate()
-            .map(|(idx, &(node, _))| (idx, self.score(&self.features(node, layered, graph))))
+            .map(|(idx, &(node, _))| (idx, self.score(&self.features(node, layered, graph, expected_relation))))
             .collect();
         let mut order: Vec<usize> = (0..candidates.len()).collect();
         order.sort_by(|&a, &b| {
@@ -106,12 +116,13 @@ impl Reranker {
         target: NodeId,
         layered: &LayeredResult,
         graph: &Graph,
+        expected_relation: Option<RelationId>,
         signal: f32,
     ) {
         let lr = self.cfg.learning_rate * signal;
         let k = self.cfg.top_k.min(candidates.len());
         for &(node, _) in &candidates[..k] {
-            let feats = self.features(node, layered, graph);
+            let feats = self.features(node, layered, graph, expected_relation);
             let y = if node == target { 1.0 } else { 0.0 };
             let p = sigmoid(self.score(&feats));
             let g = y - p;
@@ -137,7 +148,7 @@ impl Reranker {
         use std::io::Write;
         let mut f = std::fs::File::create(tmp)?;
         f.write_all(b"RGRK")?;
-        f.write_u32::<LittleEndian>(1)?;
+        f.write_u32::<LittleEndian>(2)?;
         f.write_u32::<LittleEndian>(self.n_relations as u32)?;
         f.write_u32::<LittleEndian>(self.max_depth as u32)?;
         f.write_f32::<LittleEndian>(self.b)?;
@@ -161,12 +172,12 @@ impl Reranker {
             return Err(RerankerError::Corrupt("bad magic".into()));
         }
         let version = f.read_u32::<LittleEndian>()?;
-        if version != 1 {
+        if version != 2 {
             return Err(RerankerError::Corrupt(format!("unsupported version {version}")));
         }
         let n_relations = f.read_u32::<LittleEndian>()? as usize;
         let max_depth = f.read_u32::<LittleEndian>()? as usize;
-        let dim = (max_depth + 1) + 2 + n_relations;
+        let dim = (max_depth + 1) + 2 + n_relations + 1;
         if dim > MAX_DIM || (dim as u64) * 4 > file_len {
             return Err(RerankerError::Corrupt(format!("implausible dim {dim}")));
         }
@@ -217,7 +228,7 @@ mod tests {
         let r = Reranker::new(1, 2, cfg());
         let mut cands = vec![(1u32, 0.9f32), (2, 0.8), (3, 0.7)];
         let before = cands.clone();
-        r.rerank(&mut cands, &layered, &g);
+        r.rerank(&mut cands, &layered, &g, None);
         assert_eq!(cands, before, "w=0 must leave order unchanged");
     }
 
@@ -228,10 +239,10 @@ mod tests {
         let mut r = Reranker::new(1, 2, cfg());
         let cands = vec![(1u32, 0.5f32), (2, 0.9), (3, 0.5)];
         for _ in 0..200 {
-            r.update(&cands, 1, &layered, &g, 1.0);
+            r.update(&cands, 1, &layered, &g, None, 1.0);
         }
         let mut c2 = cands.clone();
-        r.rerank(&mut c2, &layered, &g);
+        r.rerank(&mut c2, &layered, &g, None);
         assert_eq!(c2.first().map(|x| x.0), Some(1),
             "after training, the low-degree answer should rank first, got {c2:?}");
     }
@@ -241,11 +252,81 @@ mod tests {
         let (g, layered) = fixture();
         let mut r = Reranker::new(1, 2, cfg());
         let cands = vec![(1u32, 0.5f32), (2, 0.9), (3, 0.5)];
-        for _ in 0..20 { r.update(&cands, 1, &layered, &g, 1.0); }
+        for _ in 0..20 { r.update(&cands, 1, &layered, &g, None, 1.0); }
         let path = "test_reranker_roundtrip.bin";
         r.save(path).unwrap();
         let t = Reranker::load(path).unwrap();
-        let f = t.features(2, &layered, &g);
+        let f = t.features(2, &layered, &g, None);
+        assert!((t.score(&f) - r.score(&f)).abs() < 1e-6);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn match_feature_fires_only_on_the_expected_relation() {
+        let (g, _l) = fixture();
+        let r = Reranker::new(3, 2, cfg());
+        let mut per = HashMap::new();
+        per.insert(1u32, vec![0.0, 0.0, 0.5]);
+        let mut dom = HashMap::new();
+        dom.insert(1u32, 2u16); // node 1 arrived via relation 2
+        let layered = LayeredResult { per_depth: per, dominant_incoming: dom };
+        let last = r.features(1, &layered, &g, Some(2)); // expected == 2 => match
+        let miss = r.features(1, &layered, &g, Some(0)); // expected == 0 => no match
+        let none = r.features(1, &layered, &g, None);    // no schedule => 0
+        let m = last.len() - 1;
+        assert_eq!(last[m], 1.0);
+        assert_eq!(miss[m], 0.0);
+        assert_eq!(none[m], 0.0);
+    }
+
+    #[test]
+    fn cold_start_identity_holds_with_expected_relation() {
+        let (g, layered) = fixture();
+        let r = Reranker::new(1, 2, cfg());
+        let mut cands = vec![(1u32, 0.9f32), (2, 0.8), (3, 0.7)];
+        let before = cands.clone();
+        r.rerank(&mut cands, &layered, &g, Some(0)); // w=0 => identity even with a schedule
+        assert_eq!(cands, before);
+    }
+
+    #[test]
+    fn learns_the_match_signal_not_a_global_relation() {
+        // Two queries with DIFFERENT expected relations; each query's answer is the
+        // candidate whose incoming relation matches THAT query's expected relation. The
+        // global one-hot nets to ~0 (each relation is answer once, distractor once), so
+        // only the match feature separates them.
+        let g = Graph::from_adjacency(3, vec![vec![], vec![], vec![]], NodeProps::default()).unwrap();
+        let mut r = Reranker::new(3, 2, cfg());
+        let mut per = HashMap::new();
+        per.insert(1u32, vec![0.0, 0.0, 0.5]);
+        per.insert(2u32, vec![0.0, 0.0, 0.5]);
+        let mut dom = HashMap::new();
+        dom.insert(1u32, 1u16);
+        dom.insert(2u32, 2u16);
+        let layered = LayeredResult { per_depth: per, dominant_incoming: dom };
+        let cands = vec![(1u32, 0.5f32), (2u32, 0.5f32)];
+        for _ in 0..300 {
+            r.update(&cands, 1, &layered, &g, Some(1), 1.0); // expect rel 1 -> node 1
+            r.update(&cands, 2, &layered, &g, Some(2), 1.0); // expect rel 2 -> node 2
+        }
+        let mut a = cands.clone();
+        r.rerank(&mut a, &layered, &g, Some(1));
+        assert_eq!(a.first().map(|x| x.0), Some(1));
+        let mut b = cands.clone();
+        r.rerank(&mut b, &layered, &g, Some(2));
+        assert_eq!(b.first().map(|x| x.0), Some(2));
+    }
+
+    #[test]
+    fn save_load_roundtrip_with_match_feature() {
+        let (g, layered) = fixture();
+        let mut r = Reranker::new(1, 2, cfg());
+        let cands = vec![(1u32, 0.5f32), (2, 0.9), (3, 0.5)];
+        for _ in 0..20 { r.update(&cands, 1, &layered, &g, Some(0), 1.0); }
+        let path = "test_reranker_match_roundtrip.bin";
+        r.save(path).unwrap();
+        let t = Reranker::load(path).unwrap();
+        let f = t.features(2, &layered, &g, Some(0));
         assert!((t.score(&f) - r.score(&f)).abs() < 1e-6);
         let _ = std::fs::remove_file(path);
     }
