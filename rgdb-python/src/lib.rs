@@ -4,7 +4,7 @@ use pyo3::prelude::*;
 use rgdb::graph::{Graph, NodeProps, EdgeProps, NodeId, RelationId};
 use rgdb::relation::RelationVocab;
 use rgdb::propagation::{propagate as rust_propagate, propagate_layered as rust_propagate_layered, PropagationParams};
-use rgdb::engine::{RgdbEngine, QueryId};
+use rgdb::engine::{RgdbEngine, QueryId, EngineConfig};
 use rgdb::transitions::TransitionConfig;
 use rgdb::depth_weights::DepthWeights;
 
@@ -127,10 +127,14 @@ struct PyEngine { inner: RgdbEngine }
 #[pymethods]
 impl PyEngine {
     #[new]
-    #[pyo3(signature = (graph, vocab, prior_strength=10.0, floor=0.05, decay=1.0, rebuild_every_n=64))]
-    fn new(graph: &PyGraph, vocab: &PyVocab, prior_strength: f32, floor: f32, decay: f32, rebuild_every_n: u32) -> Self {
-        let cfg = TransitionConfig { prior_strength, floor, decay, rebuild_every_n };
-        PyEngine { inner: RgdbEngine::new(graph.inner.clone(), vocab.inner.clone(), cfg) }
+    #[pyo3(signature = (graph, vocab, prior_strength=10.0, floor=0.05, decay=1.0, rebuild_every_n=64, reranker_enabled=false))]
+    fn new(graph: &PyGraph, vocab: &PyVocab, prior_strength: f32, floor: f32, decay: f32,
+           rebuild_every_n: u32, reranker_enabled: bool) -> Self {
+        let tcfg = TransitionConfig { prior_strength, floor, decay, rebuild_every_n };
+        let ecfg = EngineConfig { reranker_enabled, ..EngineConfig::default() };
+        PyEngine {
+            inner: RgdbEngine::with_engine_config(graph.inner.clone(), vocab.inner.clone(), tcfg, ecfg),
+        }
     }
 
     #[staticmethod]
