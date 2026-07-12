@@ -204,10 +204,10 @@ impl RgdbEngine {
         let ranked_topk: Vec<(NodeId, f32)> =
             ranked.iter().take(topk_n).copied().collect();
         if self.engine_cfg.reranker_enabled {
+            let expected_relation = resolved.schedule.as_ref().and_then(|s| s.last().copied());
             let rr = self.reranker.lock().unwrap();
-            // Rerank only the top-K slice, leave the tail as-is.
             let mut head: Vec<(NodeId, f32)> = ranked.iter().take(topk_n).copied().collect();
-            rr.rerank(&mut head, &layered, &self.graph);
+            rr.rerank(&mut head, &layered, &self.graph, expected_relation);
             for (i, item) in head.into_iter().enumerate() {
                 ranked[i] = item;
             }
@@ -299,8 +299,9 @@ impl RgdbEngine {
         // Reranker: trains from feedback only when enabled (default off — see
         // EngineConfig::reranker_enabled), under the query-time top-K and layered result.
         if self.engine_cfg.reranker_enabled {
+            let expected_relation = ctx.params.schedule.as_ref().and_then(|s| s.last().copied());
             let mut rr = self.reranker.lock().unwrap();
-            rr.update(&ctx.ranked_topk, target, &ctx.layered, &self.graph, signal);
+            rr.update(&ctx.ranked_topk, target, &ctx.layered, &self.graph, expected_relation, signal);
         }
 
         // Transition learner: credit under the query-time vocab + params. May be empty
@@ -728,5 +729,30 @@ mod tests {
             after.ranked, cold_ranked,
             "reranker_enabled = false must leave the diffusion ranking untouched by feedback"
         );
+    }
+
+    #[test]
+    fn engine_reranker_runs_and_trains_under_a_schedule() {
+        // Wiring/integration: reranker_enabled + a schedule -> query returns a valid
+        // ranking and feedback trains without error over the schedule path (the engine
+        // derives expected_relation = schedule.last() and hands it to the reranker).
+        // Behavioral proof of the match feature is in reranker.rs (unit) and the eval gate.
+        let a = |d, r| (d as u32, EdgeProps { attenuation: 0.0, relation: r, is_portal: false });
+        // 0 -A-> 1 -B-> 2  (node 2 reachable at depth 2)
+        let g = Graph::from_adjacency(3, vec![vec![a(1, 0)], vec![a(2, 1)], vec![]], NodeProps::default()).unwrap();
+        let prior = RelationVocab::with_names_uniform(vec!["A".into(), "B".into()]);
+        let e = RgdbEngine::with_engine_config(
+            g, prior,
+            TransitionConfig { rebuild_every_n: 0, ..TransitionConfig::default() },
+            EngineConfig { reranker_enabled: true, ..EngineConfig::default() });
+        let p = PropagationParams {
+            max_depth: 2, min_intensity: 0.0, depth_weights: None, schedule: Some(vec![0, 1]),
+        };
+        let r = e.query(&[(0, 1.0)], Some(0), None, &p);
+        assert!(!r.ranked.is_empty());
+        assert!(e.record_feedback(r.query_id, 2, 1.0).is_ok(), "feedback trains under the schedule");
+        // a second round still runs cleanly
+        let r2 = e.query(&[(0, 1.0)], Some(0), None, &p);
+        assert!(!r2.ranked.is_empty());
     }
 }
